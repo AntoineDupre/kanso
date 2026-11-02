@@ -6,6 +6,7 @@ use std::time::Duration;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use kanso::auth::AuthConfig;
 use kanso::cli::{Cli, Command};
 use kanso::config::Config;
 use kanso::db;
@@ -76,7 +77,12 @@ async fn serve(port: Option<u16>, data_dir: Option<PathBuf>) -> Result<()> {
             db_path.display()
         ))
     })?;
-    drop(connection);
+    let database = db::Database::from_connection(db_path.clone(), connection);
+    let auth = AuthConfig::load(
+        config.password(),
+        config.public_url.as_deref(),
+        &config.data_dir,
+    )?;
 
     let web_dir = web::default_web_dir();
     if !web_dir.join("index.html").is_file() {
@@ -93,7 +99,7 @@ async fn serve(port: Option<u16>, data_dir: Option<PathBuf>) -> Result<()> {
         "starting kanso"
     );
 
-    let app = server::router(server::AppState::new(db_path, web_dir));
+    let app = server::router(server::AppState::new(database, web_dir, auth));
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
         .map_err(|error| Error::msg(format!("failed to bind {}: {error}", config.bind)))?;
@@ -104,9 +110,12 @@ async fn serve(port: Option<u16>, data_dir: Option<PathBuf>) -> Result<()> {
         server::shutdown_signal().await;
         let _ = shutdown_started_tx.send(());
     };
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .into_future();
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .into_future();
     tokio::pin!(server);
 
     tokio::select! {

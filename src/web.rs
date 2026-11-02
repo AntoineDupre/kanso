@@ -182,7 +182,10 @@ mod tests {
             .expect("write index");
         std::fs::write(web_dir.join("app.js"), "console.log('kanso');").expect("write app.js");
         std::fs::create_dir_all(web_dir.join("assets")).expect("create assets directory");
-        router(AppState::new(dir.path().join("kanso.db"), web_dir))
+        let database =
+            crate::db::Database::open(&dir.path().join("kanso.db")).expect("open database");
+        let auth = crate::auth::AuthConfig::load("secret", None, dir.path()).expect("auth config");
+        router(AppState::new(database, web_dir, auth))
     }
 
     async fn get(app: axum::Router, uri: &str) -> Response {

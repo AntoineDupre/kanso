@@ -11,7 +11,8 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::db;
+use crate::auth::AuthConfig;
+use crate::db::{self, Database};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -21,8 +22,12 @@ const HEALTH_CACHE_TTL: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct AppState {
+    pub db: Database,
+    /// Health-check path; normally the same file as `db`.
     pub db_path: PathBuf,
     pub web_dir: PathBuf,
+    pub auth: Arc<AuthConfig>,
+    pub login_limiter: Arc<crate::auth::LoginLimiter>,
     health: Arc<Mutex<Option<HealthCache>>>,
     health_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -34,10 +39,14 @@ struct HealthCache {
 }
 
 impl AppState {
-    pub fn new(db_path: PathBuf, web_dir: PathBuf) -> Self {
+    pub fn new(db: Database, web_dir: PathBuf, auth: AuthConfig) -> Self {
+        let db_path = db.path().to_path_buf();
         Self {
+            db,
             db_path,
             web_dir,
+            auth: Arc::new(auth),
+            login_limiter: Arc::new(crate::auth::LoginLimiter::default()),
             health: Arc::new(Mutex::new(None)),
             health_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -93,6 +102,7 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .merge(crate::api::routes())
         .route("/", get(crate::web::index))
         .route("/{*path}", get(crate::web::asset))
         .with_state(state)
@@ -185,16 +195,16 @@ mod tests {
         serde_json::from_slice(&bytes).expect("parse response JSON")
     }
 
-    fn state_for(dir: &TempDir) -> AppState {
-        AppState::new(dir.path().join("kanso.db"), dir.path().join("web"))
+    fn migrated_state(dir: &TempDir) -> AppState {
+        let database = Database::open(&dir.path().join("kanso.db")).expect("open database");
+        let auth = AuthConfig::load("secret", None, dir.path()).expect("auth config");
+        AppState::new(database, dir.path().join("web"), auth)
     }
 
-    fn migrated_state(dir: &TempDir) -> AppState {
-        let path = dir.path().join("kanso.db");
-        let mut connection = db::open(&path).expect("open database");
-        db::migrate(&mut connection).expect("migrate database");
-        drop(connection);
-        AppState::new(path, dir.path().join("web"))
+    fn state_with_health_path(dir: &TempDir, health_path: PathBuf) -> AppState {
+        let mut state = migrated_state(dir);
+        state.db_path = health_path;
+        state
     }
 
     #[tokio::test]
@@ -212,7 +222,11 @@ mod tests {
     #[tokio::test]
     async fn health_reports_unavailable_without_a_database() {
         let dir = TempDir::new();
-        let response = health(State(state_for(&dir))).await;
+        let response = health(State(state_with_health_path(
+            &dir,
+            dir.path().join("missing.db"),
+        )))
+        .await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         let body = body_json(response).await;
@@ -223,10 +237,10 @@ mod tests {
     #[tokio::test]
     async fn health_reports_unavailable_for_a_corrupt_database() {
         let dir = TempDir::new();
-        std::fs::write(dir.path().join("kanso.db"), b"not a sqlite database")
-            .expect("write corrupt database");
+        let corrupt = dir.path().join("corrupt.db");
+        std::fs::write(&corrupt, b"not a sqlite database").expect("write corrupt database");
 
-        let response = health(State(state_for(&dir))).await;
+        let response = health(State(state_with_health_path(&dir, corrupt))).await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body_json(response).await["db"], "error");
     }
