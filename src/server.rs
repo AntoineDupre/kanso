@@ -22,6 +22,7 @@ const HEALTH_CACHE_TTL: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub struct AppState {
     pub db_path: PathBuf,
+    pub web_dir: PathBuf,
     health: Arc<Mutex<Option<HealthCache>>>,
     health_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -33,9 +34,10 @@ struct HealthCache {
 }
 
 impl AppState {
-    pub fn new(db_path: PathBuf) -> Self {
+    pub fn new(db_path: PathBuf, web_dir: PathBuf) -> Self {
         Self {
             db_path,
+            web_dir,
             health: Arc::new(Mutex::new(None)),
             health_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -91,6 +93,8 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route("/", get(crate::web::index))
+        .route("/{*path}", get(crate::web::asset))
         .with_state(state)
 }
 
@@ -182,7 +186,7 @@ mod tests {
     }
 
     fn state_for(dir: &TempDir) -> AppState {
-        AppState::new(dir.path().join("kanso.db"))
+        AppState::new(dir.path().join("kanso.db"), dir.path().join("web"))
     }
 
     fn migrated_state(dir: &TempDir) -> AppState {
@@ -190,7 +194,7 @@ mod tests {
         let mut connection = db::open(&path).expect("open database");
         db::migrate(&mut connection).expect("migrate database");
         drop(connection);
-        AppState::new(path)
+        AppState::new(path, dir.path().join("web"))
     }
 
     #[tokio::test]

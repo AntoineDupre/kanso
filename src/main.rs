@@ -11,6 +11,7 @@ use kanso::config::Config;
 use kanso::db;
 use kanso::error::{Error, Result};
 use kanso::server;
+use kanso::web;
 
 const EXIT_OK: u8 = 0;
 const EXIT_USAGE: u8 = 1;
@@ -77,14 +78,22 @@ async fn serve(port: Option<u16>, data_dir: Option<PathBuf>) -> Result<()> {
     })?;
     drop(connection);
 
+    let web_dir = web::default_web_dir();
+    if !web_dir.join("index.html").is_file() {
+        return Err(Error::msg(format!(
+            "web assets not found: expected {}",
+            web_dir.join("index.html").display()
+        )));
+    }
     tracing::info!(
         bind = %config.bind,
         database = %db_path.display(),
+        web = %web_dir.display(),
         schema_version,
         "starting kanso"
     );
 
-    let app = server::router(server::AppState::new(db_path));
+    let app = server::router(server::AppState::new(db_path, web_dir));
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
         .map_err(|error| Error::msg(format!("failed to bind {}: {error}", config.bind)))?;
