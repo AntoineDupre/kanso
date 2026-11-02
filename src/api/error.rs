@@ -28,9 +28,16 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "validation", message)
     }
 
-    /// A body-extraction failure keeps Axum's status (400/413/415/422) but uses
-    /// the API's `validation` code.
+    /// A body-extraction failure keeps Axum's status (400/413/415) but uses the
+    /// API's `validation` code. Data errors (422) become 400.
     pub fn rejection(status: StatusCode, message: impl Into<String>) -> Self {
+        // Serde data errors surface as 422; the API contract treats them as
+        // ordinary validation failures (400).
+        let status = if status == StatusCode::UNPROCESSABLE_ENTITY {
+            StatusCode::BAD_REQUEST
+        } else {
+            status
+        };
         Self::new(status, "validation", message)
     }
 
