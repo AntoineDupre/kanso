@@ -1,0 +1,14 @@
+.git
+.github
+.gitignore
+target
+data
+docs
+*.db
+*.db-wal
+*.db-shm
+.env
+*.env.local
+node_modules
+PLAN.md
+README.md
