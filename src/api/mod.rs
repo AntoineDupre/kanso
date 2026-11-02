@@ -17,10 +17,15 @@ use crate::auth::{
 use crate::ids;
 use crate::server::AppState;
 
+mod checklist;
+mod comments;
 mod error;
+mod labels;
 mod model;
 mod projects;
 mod session;
+mod tasks;
+mod tokens;
 
 pub use error::ApiError;
 
@@ -243,6 +248,26 @@ pub fn routes() -> Router<AppState> {
             get(projects::get).patch(projects::update),
         )
         .route("/api/projects/{id}/archive", post(projects::archive))
+        .route("/api/tasks", get(tasks::list).post(tasks::create))
+        .route(
+            "/api/tasks/{reference}",
+            get(tasks::get).patch(tasks::update).delete(tasks::delete),
+        )
+        .route("/api/tasks/{reference}/archive", post(tasks::archive))
+        .route("/api/tasks/{reference}/restore", post(tasks::restore))
+        .route("/api/tasks/{reference}/comment", post(comments::create))
+        .route("/api/tasks/{reference}/checklist", post(checklist::create))
+        .route(
+            "/api/tasks/{reference}/checklist/{item}",
+            axum::routing::patch(checklist::update).delete(checklist::delete),
+        )
+        .route("/api/labels", get(labels::list).post(labels::create))
+        .route(
+            "/api/labels/{id}",
+            axum::routing::patch(labels::update).delete(labels::delete),
+        )
+        .route("/api/tokens", get(tokens::list).post(tokens::create))
+        .route("/api/tokens/{id}", axum::routing::delete(tokens::revoke))
 }
 
 /// Double-option field: absent -> `None`, `null` -> `Some(None)`, value ->
