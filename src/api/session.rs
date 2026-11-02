@@ -1,13 +1,11 @@
-use std::net::SocketAddr;
-
-use axum::extract::{ConnectInfo, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::Json;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
-use super::{now_millis, response_with_cookie, ApiError, ApiJson, Auth};
+use super::{now_millis, response_with_cookie, ApiError, ApiJson, Auth, PeerAddr};
 use crate::auth::{self, SESSION_MAX_AGE_MILLIS};
 use crate::ids;
 use crate::server::AppState;
@@ -21,10 +19,10 @@ pub struct LoginRequest {
 pub async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    PeerAddr(peer): PeerAddr,
     ApiJson(payload): ApiJson<LoginRequest>,
 ) -> Result<Response, ApiError> {
-    let ip = auth::client_ip(&headers, Some(peer));
+    let ip = auth::client_ip(&headers, peer);
     if !state.login_limiter.try_begin(&ip) {
         return Err(ApiError::rate_limited());
     }

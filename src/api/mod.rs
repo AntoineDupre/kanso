@@ -1,6 +1,8 @@
+use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{FromRequest, FromRequestParts, Query, Request};
+use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Query, Request};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
@@ -28,6 +30,25 @@ mod tasks;
 mod tokens;
 
 pub use error::ApiError;
+
+/// Optional peer address, present when serving with `ConnectInfo`.
+pub struct PeerAddr(pub Option<SocketAddr>);
+
+impl FromRequestParts<AppState> for PeerAddr {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|peer| peer.0),
+        ))
+    }
+}
 
 /// The authenticated caller, extracted from a bearer token or session cookie.
 pub struct Auth(pub Identity);
