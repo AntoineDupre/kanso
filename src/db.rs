@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rusqlite::{Connection, TransactionBehavior};
@@ -32,6 +33,59 @@ pub fn open(path: &Path) -> Result<Connection> {
 /// serialize instead of racing. Running this twice is a no-op.
 pub fn migrate(connection: &mut Connection) -> Result<u32> {
     apply(connection, MIGRATIONS)
+}
+
+/// SQLite access used from axum handlers.
+///
+/// All calls run on Tokio's blocking pool with a single serialized connection.
+/// Holding the `std::sync::Mutex` inside the blocking closure means the async
+/// runtime never waits on SQLite, and no guard is ever held across `.await`.
+#[derive(Clone)]
+pub struct Database {
+    path: PathBuf,
+    connection: Arc<Mutex<Connection>>,
+}
+
+impl Database {
+    /// Open, configure and migrate the database at `path`.
+    pub fn open(path: &Path) -> Result<Self> {
+        let mut connection = open(path)?;
+        migrate(&mut connection)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            connection: Arc::new(Mutex::new(connection)),
+        })
+    }
+
+    /// Wrap an already opened and migrated connection.
+    pub fn from_connection(path: PathBuf, connection: Connection) -> Self {
+        Self {
+            path,
+            connection: Arc::new(Mutex::new(connection)),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Run one synchronous SQLite operation on the blocking pool.
+    ///
+    /// The closure receives `&mut Connection` so it can start transactions. It
+    /// must be `'static` because it moves to another thread.
+    pub async fn call<F, T>(&self, operation: F) -> Result<T>
+    where
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let connection = Arc::clone(&self.connection);
+        tokio::task::spawn_blocking(move || {
+            let mut connection = connection.lock().unwrap_or_else(|error| error.into_inner());
+            operation(&mut connection)
+        })
+        .await
+        .map_err(|error| Error::msg(format!("database worker failed: {error}")))?
+    }
 }
 
 fn apply(connection: &mut Connection, migrations: &[&str]) -> Result<u32> {
@@ -240,5 +294,50 @@ mod tests {
         let dir = TempDir::new();
         assert!(!quick_check(&dir.path().join("missing.db")));
         assert!(!dir.path().join("missing.db").exists());
+    }
+
+    #[tokio::test]
+    async fn database_calls_run_off_the_async_worker() {
+        let dir = TempDir::new();
+        let path = dir.path().join("kanso.db");
+        let database = Database::open(&path).expect("open database");
+        let caller = std::thread::current().id();
+
+        let (value, worker) = database
+            .call(move |connection| {
+                let value = connection
+                    .query_row("SELECT 41 + 1", [], |row| row.get::<_, i64>(0))
+                    .map_err(Error::from)?;
+                Ok((value, std::thread::current().id()))
+            })
+            .await
+            .expect("run query");
+        assert_eq!(value, 42);
+        assert_ne!(caller, worker);
+        assert_eq!(database.path(), path);
+    }
+
+    #[tokio::test]
+    async fn concurrent_database_calls_are_serialized() {
+        let dir = TempDir::new();
+        let database = Database::open(&dir.path().join("kanso.db")).expect("open database");
+
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let database = database.clone();
+            tasks.push(tokio::spawn(async move {
+                database
+                    .call(|connection| {
+                        connection
+                            .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                            .map_err(Error::from)
+                    })
+                    .await
+                    .expect("query")
+            }));
+        }
+        for task in tasks {
+            assert_eq!(task.await.expect("join"), 1);
+        }
     }
 }
