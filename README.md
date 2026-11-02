@@ -3,11 +3,10 @@
 A single-user kanban board for your projects, with **optional** OpenCode /
 OpenChamber agent sessions.
 
-The design and milestone plan live in [PLAN.md](PLAN.md). This branch implements
-**M0 (scaffold)**: the server, SQLite schema, health endpoint, static shell and
-container image exist; the board, API and CLI arrive in later milestones.
-`PLAN.md` remains the design reference and its status line predates this
-milestone.
+The design, scope and milestone plan live in [PLAN.md](PLAN.md). It is the
+reference for the architecture, data model, HTTP API, CLI and roadmap; the code
+and its tests show what is implemented today. This README covers building,
+running, testing and configuring the project.
 
 ## Requirements
 
@@ -64,7 +63,7 @@ data in the `/data` volume, exposes port 8087 and probes `/api/health`.
 
 ## HTTP surface
 
-Only `GET /api/health` exists in M0. Non-`/api` routes serve the static shell
+Only `GET /api/health` exists today. Non-`/api` routes serve the static shell
 from `web/`, with history fallback to `index.html` and `{{VERSION}}` replaced by
 the binary version; a missing asset with a file extension returns 404.
 
