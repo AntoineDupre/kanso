@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::http::{header, HeaderMap, Method};
+use hmac::{Hmac, Mac};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -130,7 +131,7 @@ impl AuthConfig {
 
     /// Sign a session id into the cookie value: `id.signature`.
     pub fn signed_session(&self, session_id: &str) -> String {
-        let signature = hmac_sha256(&self.hmac_key, session_id.as_bytes());
+        let signature = session_signature(&self.hmac_key, session_id);
         format!("{session_id}.{}", ids::base64_url(&signature))
     }
 
@@ -141,7 +142,7 @@ impl AuthConfig {
             return None;
         }
         let signature = ids::decode_base64_url(encoded)?;
-        let expected = hmac_sha256(&self.hmac_key, session_id.as_bytes());
+        let expected = session_signature(&self.hmac_key, session_id);
         constant_time_eq(&signature, &expected).then(|| session_id.to_owned())
     }
 
@@ -281,31 +282,12 @@ pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     difference == 0
 }
 
-/// HMAC-SHA-256 (RFC 2104) with a 64-byte block.
-pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
-    let mut block_key = [0_u8; 64];
-    if key.len() > 64 {
-        block_key[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        block_key[..key.len()].copy_from_slice(key);
-    }
+type HmacSha256 = Hmac<Sha256>;
 
-    let mut inner_pad = [0x36_u8; 64];
-    let mut outer_pad = [0x5c_u8; 64];
-    for index in 0..64 {
-        inner_pad[index] ^= block_key[index];
-        outer_pad[index] ^= block_key[index];
-    }
-
-    let mut inner = Sha256::new();
-    inner.update(inner_pad);
-    inner.update(message);
-    let inner = inner.finalize();
-
-    let mut outer = Sha256::new();
-    outer.update(outer_pad);
-    outer.update(inner);
-    outer.finalize().into()
+fn session_signature(key: &[u8], session_id: &str) -> [u8; 32] {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA-256 accepts keys of any size");
+    mac.update(session_id.as_bytes());
+    mac.finalize().into_bytes().into()
 }
 
 /// Read `kanso_session` from one or more `Cookie` headers.
@@ -510,7 +492,7 @@ mod tests {
 
     #[test]
     fn hmac_matches_rfc_4231_case_two() {
-        let digest = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        let digest = session_signature(b"Jefe", "what do ya want for nothing?");
         // Hex is easier to compare against the RFC.
         let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(
@@ -522,15 +504,33 @@ mod tests {
     #[test]
     fn hmac_hashes_keys_longer_than_the_block() {
         let key = [0xaa_u8; 131];
-        let digest = hmac_sha256(
+        let digest = session_signature(
             &key,
-            b"Test Using Larger Than Block-Size Key - Hash Key First",
+            "Test Using Larger Than Block-Size Key - Hash Key First",
         );
         let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(
             hex,
             "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
         );
+    }
+
+    #[test]
+    fn cookies_from_the_previous_implementation_are_still_valid() {
+        // Fixed key [7; 32] and session id, signed by the old hand-written
+        // implementation: the signature must remain byte-for-byte identical.
+        let config = AuthConfig {
+            password_digest: [0_u8; 32],
+            hmac_key: [7_u8; 32],
+            public_url: None,
+            cookie_secure: false,
+        };
+        let legacy = "legacy-session-id.n87qyKYN1NzumSF6PgoWPGcFCbczPQKV8C49CI9wmtM";
+        assert_eq!(
+            config.verify_session(legacy).as_deref(),
+            Some("legacy-session-id")
+        );
+        assert_eq!(config.signed_session("legacy-session-id"), legacy);
     }
 
     #[test]
