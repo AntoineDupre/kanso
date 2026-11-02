@@ -1,0 +1,26 @@
+[package]
+name = "kanso"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Single-user kanban board with optional agent sessions"
+license = "Apache-2.0"
+repository = "https://github.com/dupremathieu/kanso"
+readme = "README.md"
+
+[[bin]]
+name = "kanso"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8.9"
+clap = { version = "4.6.7", features = ["derive"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.54", features = ["fs", "macros", "net", "rt-multi-thread", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+strip = true
