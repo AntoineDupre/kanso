@@ -1,0 +1,16 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Local data and secrets
+/data
+*.db
+*.db-wal
+*.db-shm
+.env
+*.env.local
+
+# Tooling
+node_modules/
+.DS_Store
+dist/
