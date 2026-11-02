@@ -6,6 +6,7 @@ use tracing_subscriber::EnvFilter;
 
 use kanso::cli::{Cli, Command};
 use kanso::config::Config;
+use kanso::db;
 use kanso::error::{Error, Result};
 
 const EXIT_OK: u8 = 0;
@@ -52,9 +53,31 @@ async fn serve(port: Option<u16>, data_dir: Option<PathBuf>) -> Result<()> {
     }
     init_tracing(&config.log)?;
 
+    std::fs::create_dir_all(&config.data_dir).map_err(|error| {
+        Error::msg(format!(
+            "failed to create data directory {}: {error}",
+            config.data_dir.display()
+        ))
+    })?;
+    let db_path = config.db_path();
+    let mut connection = db::open(&db_path).map_err(|error| {
+        Error::msg(format!(
+            "failed to open database {}: {error}",
+            db_path.display()
+        ))
+    })?;
+    let schema_version = db::migrate(&mut connection).map_err(|error| {
+        Error::msg(format!(
+            "failed to migrate database {}: {error}",
+            db_path.display()
+        ))
+    })?;
+    drop(connection);
+
     tracing::info!(
         bind = %config.bind,
-        database = %config.db_path().display(),
+        database = %db_path.display(),
+        schema_version,
         "starting kanso"
     );
 
