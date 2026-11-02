@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{FromRequest, FromRequestParts, Request};
+use axum::extract::{FromRequest, FromRequestParts, Query, Request};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
@@ -8,6 +8,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use rusqlite::{params, OptionalExtension};
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 
 use crate::auth::{
     self, Identity, IdentityKind, Scope, SESSION_LAST_SEEN_INTERVAL_MILLIS,
@@ -17,6 +18,8 @@ use crate::ids;
 use crate::server::AppState;
 
 mod error;
+mod model;
+mod projects;
 mod session;
 
 pub use error::ApiError;
@@ -161,6 +164,27 @@ async fn token_identity(state: &AppState, token: &str) -> Result<Identity, ApiEr
     }
 }
 
+/// Query-string extractor with the API error envelope on malformed input.
+pub struct ApiQuery<T>(pub T);
+
+impl<T, S> FromRequestParts<S> for ApiQuery<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match Query::<T>::from_request_parts(parts, state).await {
+            Ok(Query(value)) => Ok(Self(value)),
+            Err(rejection) => Err(ApiError::validation(format!(
+                "invalid query parameters: {}",
+                rejection.body_text()
+            ))),
+        }
+    }
+}
+
 /// JSON body extractor with the API error envelope on malformed input.
 pub struct ApiJson<T>(pub T);
 
@@ -213,4 +237,47 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/login", post(session::login))
         .route("/api/auth/logout", post(session::logout))
         .route("/api/me", get(session::me))
+        .route("/api/projects", get(projects::list).post(projects::create))
+        .route(
+            "/api/projects/{id}",
+            get(projects::get).patch(projects::update),
+        )
+        .route("/api/projects/{id}/archive", post(projects::archive))
+}
+
+/// Double-option field: absent -> `None`, `null` -> `Some(None)`, value ->
+/// `Some(Some(value))`. Used by PATCH payloads that can clear nullable columns.
+pub fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+pub fn parse_flag(value: Option<&str>, default: bool) -> Result<bool, ApiError> {
+    match value {
+        None => Ok(default),
+        Some("") | Some("1") | Some("true") | Some("yes") => Ok(true),
+        Some("0") | Some("false") | Some("no") => Ok(false),
+        Some(other) => Err(ApiError::validation(format!(
+            "invalid boolean value {other:?}; use 1 or 0"
+        ))),
+    }
+}
+
+/// Validate `#rrggbb` colours shared by projects and labels.
+pub fn validate_color(raw: &str) -> Result<String, ApiError> {
+    let color = raw.trim();
+    if color.len() != 7
+        || !color.starts_with('#')
+        || !color[1..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err(ApiError::validation(
+            "color must be a #rrggbb hexadecimal value",
+        ));
+    }
+    Ok(color.to_ascii_lowercase())
 }
