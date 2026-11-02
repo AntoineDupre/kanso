@@ -80,6 +80,7 @@ pub fn quick_check(path: &Path) -> bool {
     }
     Connection::open(path)
         .and_then(|connection| {
+            connection.busy_timeout(Duration::from_secs(5))?;
             connection.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
         })
         .map(|result| result == "ok")

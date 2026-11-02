@@ -1,5 +1,7 @@
+use std::future::IntoFuture;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -8,6 +10,7 @@ use kanso::cli::{Cli, Command};
 use kanso::config::Config;
 use kanso::db;
 use kanso::error::{Error, Result};
+use kanso::server;
 
 const EXIT_OK: u8 = 0;
 const EXIT_USAGE: u8 = 1;
@@ -81,6 +84,35 @@ async fn serve(port: Option<u16>, data_dir: Option<PathBuf>) -> Result<()> {
         "starting kanso"
     );
 
+    let app = server::router(server::AppState::new(db_path));
+    let listener = tokio::net::TcpListener::bind(config.bind)
+        .await
+        .map_err(|error| Error::msg(format!("failed to bind {}: {error}", config.bind)))?;
+    tracing::info!(address = %listener.local_addr()?, "kanso listening");
+
+    let (shutdown_started_tx, shutdown_started_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown = async move {
+        server::shutdown_signal().await;
+        let _ = shutdown_started_tx.send(());
+    };
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .into_future();
+    tokio::pin!(server);
+
+    tokio::select! {
+        result = &mut server => {
+            result.map_err(|error| Error::msg(format!("server error: {error}")))?;
+        }
+        () = async {
+            let _ = shutdown_started_rx.await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        } => {
+            tracing::warn!("graceful shutdown timed out; closing remaining connections");
+        }
+    }
+
+    tracing::info!("kanso stopped");
     Ok(())
 }
 
