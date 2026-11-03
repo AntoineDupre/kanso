@@ -3028,3 +3028,37 @@ async fn board_grouping_ordering_isolation_and_global_view() {
     assert_eq!(archived_board.status, StatusCode::OK);
     let _ = (first, second);
 }
+
+#[tokio::test]
+async fn move_rejects_non_adjacent_neighbours() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    for title in ["First", "Second", "Third", "Fourth"] {
+        app.create_task(&cookie, json!({"project_key": "ALP", "title": title}))
+            .await;
+    }
+
+    let non_adjacent = app
+        .cookie_post(
+            "/api/tasks/ALP-4/move",
+            Some(json!({"status": "backlog", "after": "ALP-1", "before": "ALP-3"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(non_adjacent.status, StatusCode::BAD_REQUEST);
+    assert_eq!(non_adjacent.code(), "validation");
+
+    let adjacent = app
+        .cookie_post(
+            "/api/tasks/ALP-4/move",
+            Some(json!({"status": "backlog", "after": "ALP-1", "before": "ALP-2"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(adjacent.status, StatusCode::OK, "{:?}", adjacent.body);
+    let list = app
+        .get("/api/tasks?status=backlog", Some(&cookie), None)
+        .await;
+    assert_eq!(task_refs(&list.body), ["ALP-1", "ALP-4", "ALP-2", "ALP-3"]);
+}
