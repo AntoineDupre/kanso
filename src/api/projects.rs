@@ -192,7 +192,13 @@ pub async fn create(
         .await?;
 
     match created {
-        Some(project) => Ok((StatusCode::CREATED, Json(project)).into_response()),
+        Some(project) => {
+            state.publish(
+                "project.created",
+                serde_json::json!({ "project": &project }),
+            );
+            Ok((StatusCode::CREATED, Json(project)).into_response())
+        }
         None => Err(ApiError::conflict("a project with this key already exists")),
     }
 }
@@ -328,7 +334,13 @@ pub async fn update(
         .await?;
 
     match outcome {
-        UpdateOutcome::Updated(project) => Ok(Json(*project)),
+        UpdateOutcome::Updated(project) => {
+            state.publish(
+                "project.updated",
+                serde_json::json!({ "project": &project }),
+            );
+            Ok(Json(*project))
+        }
         UpdateOutcome::Conflict => {
             Err(ApiError::conflict("a project with this key already exists"))
         }
@@ -362,6 +374,10 @@ pub async fn archive(
         })
         .await?
         .ok_or_else(|| ApiError::not_found("project not found"))?;
+    state.publish(
+        "project.archived",
+        serde_json::json!({ "project": &project }),
+    );
     Ok(Json(project))
 }
 

@@ -115,6 +115,7 @@ pub async fn create(
         })
         .await?
         .ok_or_else(|| ApiError::conflict("a label with this name already exists"))?;
+    state.publish("label.created", json!({ "label": &label }));
     Ok((StatusCode::CREATED, Json(label)).into_response())
 }
 
@@ -175,7 +176,10 @@ pub async fn update(
         .await?;
 
     match outcome {
-        UpdateOutcome::Updated(label) => Ok(Json(label)),
+        UpdateOutcome::Updated(label) => {
+            state.publish("label.updated", json!({ "label": &label }));
+            Ok(Json(label))
+        }
         UpdateOutcome::NotFound => Err(ApiError::not_found("label not found")),
         UpdateOutcome::Conflict => Err(ApiError::conflict("a label with this name already exists")),
     }
@@ -193,7 +197,7 @@ pub async fn delete(
         .call(move |connection| {
             let transaction = connection.transaction()?;
             let Some(label) = label_by_id(&transaction, &id)? else {
-                return Ok(false);
+                return Ok(None);
             };
             let task_ids = {
                 let mut statement =
@@ -216,10 +220,11 @@ pub async fn delete(
                 )?;
             }
             transaction.commit()?;
-            Ok(true)
+            Ok(Some(label))
         })
         .await?;
-    if deleted {
+    if let Some(label) = deleted {
+        state.publish("label.deleted", json!({ "label": &label }));
         Ok(StatusCode::NO_CONTENT.into_response())
     } else {
         Err(ApiError::not_found("label not found"))

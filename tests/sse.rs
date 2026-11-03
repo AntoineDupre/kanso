@@ -485,6 +485,68 @@ async fn expired_sessions_stop_existing_streams() {
     assert!(closed, "expired session stream should close");
 }
 
+#[tokio::test]
+async fn mutations_publish_events_after_commit() {
+    let app = SseApp::new(Duration::from_millis(100)).await;
+    let cookie = app.login().await;
+
+    let (status, _, project) = app
+        .request(
+            Method::POST,
+            "/api/projects",
+            Some(json!({"key": "ALP", "name": "Alpha"})),
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{project:?}");
+
+    let mut client = SseClient::cookie(app.address, &cookie).await;
+
+    let (status, _, task) = app
+        .request(
+            Method::POST,
+            "/api/tasks",
+            Some(json!({"project_key": "ALP", "title": "Live"})),
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{task:?}");
+    let created = client.next_event().await;
+    assert_eq!(created.event, "task.created");
+    assert_eq!(created.data["data"]["task"]["reference"], "ALP-1");
+
+    let reference = task["reference"].as_str().expect("reference");
+    let (status, _, _) = app
+        .request(
+            Method::PATCH,
+            &format!("/api/tasks/{reference}"),
+            Some(json!({"title": "Renamed"})),
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let updated = client.next_event().await;
+    assert_eq!(updated.event, "task.updated");
+    assert_eq!(updated.data["data"]["task"]["title"], "Renamed");
+
+    let (status, _, _) = app
+        .request(
+            Method::POST,
+            &format!("/api/tasks/{reference}/archive"),
+            None,
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let archived = client.next_event().await;
+    assert_eq!(archived.event, "task.archived");
+    assert_eq!(archived.data["data"]["task"]["state"], "archived");
+}
+
 async fn raw_headers(address: SocketAddr, request: &str) -> String {
     let mut stream = TcpStream::connect(address).await.expect("connect raw");
     stream

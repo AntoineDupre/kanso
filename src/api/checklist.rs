@@ -66,6 +66,27 @@ fn item_by_id(
         .map_err(Into::into)
 }
 
+fn load_items(
+    connection: &rusqlite::Connection,
+    task_id: &str,
+) -> crate::error::Result<Vec<ChecklistItem>> {
+    let mut statement = connection.prepare(
+        "SELECT id, text, done, position FROM checklist
+         WHERE task_id = ?1 ORDER BY position, id",
+    )?;
+    let items = statement
+        .query_map([task_id], |row| {
+            Ok(ChecklistItem {
+                id: row.get(0)?,
+                text: row.get(1)?,
+                done: row.get::<_, i64>(2)? != 0,
+                position: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(items)
+}
+
 fn renumber(connection: &rusqlite::Connection, task_id: &str) -> crate::error::Result<()> {
     let ids = {
         let mut statement = connection
@@ -166,7 +187,7 @@ pub async fn create(
     let actor = auth.0.actor().to_owned();
     let id = ids::uuid_v4()?;
 
-    let item = state
+    let created = state
         .db
         .call(move |connection| {
             let transaction = connection.transaction()?;
@@ -192,20 +213,28 @@ pub async fn create(
                 &json!({ "item_id": id, "text": text }),
             )?;
             transaction.commit()?;
-            Ok(Some(ChecklistItem {
-                id,
-                text,
-                done: false,
-                position,
-            }))
+            Ok(Some((
+                task.id,
+                ChecklistItem {
+                    id,
+                    text,
+                    done: false,
+                    position,
+                },
+            )))
         })
         .await?
         .ok_or_else(|| ApiError::not_found("task not found"))?;
+    let (task_id, item) = created;
+    state.publish(
+        "checklist.created",
+        json!({ "task_id": task_id, "item": &item }),
+    );
     Ok((StatusCode::CREATED, Json(item)).into_response())
 }
 
 enum UpdateOutcome {
-    Updated(ChecklistItem),
+    Updated(String, ChecklistItem, Vec<ChecklistItem>),
     NotFound,
     MissingNeighbour(String),
     InvalidOrder,
@@ -296,13 +325,21 @@ pub async fn update(
             )?;
             let item = item_by_id(&transaction, &task.id, &item.id)?
                 .ok_or_else(|| crate::error::Error::msg("updated checklist item missing"))?;
+            // Include the whole ordered list: a renumber rewrites siblings too.
+            let checklist = load_items(&transaction, &task.id)?;
             transaction.commit()?;
-            Ok(UpdateOutcome::Updated(item))
+            Ok(UpdateOutcome::Updated(task.id, item, checklist))
         })
         .await?;
 
     match outcome {
-        UpdateOutcome::Updated(item) => Ok(Json(item)),
+        UpdateOutcome::Updated(task_id, item, checklist) => {
+            state.publish(
+                "checklist.updated",
+                json!({ "task_id": task_id, "item": &item, "checklist": checklist }),
+            );
+            Ok(Json(item))
+        }
         UpdateOutcome::NotFound => Err(ApiError::not_found("checklist item not found")),
         UpdateOutcome::MissingNeighbour(id) => {
             Err(ApiError::validation(format!("neighbour {id:?} not found")))
@@ -325,10 +362,10 @@ pub async fn delete(
         .call(move |connection| {
             let transaction = connection.transaction()?;
             let Some(task) = task_by_ref(&transaction, &reference)? else {
-                return Ok(false);
+                return Ok(None);
             };
             let Some(item) = item_by_id(&transaction, &task.id, &item_id)? else {
-                return Ok(false);
+                return Ok(None);
             };
             transaction.execute("DELETE FROM checklist WHERE id = ?1", [&item.id])?;
             insert_activity(
@@ -339,10 +376,14 @@ pub async fn delete(
                 &json!({ "item_id": item.id, "text": item.text }),
             )?;
             transaction.commit()?;
-            Ok(true)
+            Ok(Some((task.id, item.id)))
         })
         .await?;
-    if deleted {
+    if let Some((task_id, item_id)) = deleted {
+        state.publish(
+            "checklist.deleted",
+            json!({ "task_id": task_id, "item_id": item_id }),
+        );
         Ok(StatusCode::NO_CONTENT.into_response())
     } else {
         Err(ApiError::not_found("checklist item not found"))

@@ -610,7 +610,10 @@ pub async fn create(
         .await?;
 
     match outcome {
-        CreateOutcome::Created(detail) => Ok((StatusCode::CREATED, Json(*detail)).into_response()),
+        CreateOutcome::Created(detail) => {
+            state.publish("task.created", json!({ "task": &detail.task }));
+            Ok((StatusCode::CREATED, Json(*detail)).into_response())
+        }
         CreateOutcome::UnknownProject => Err(ApiError::not_found("project not found")),
         CreateOutcome::UnknownLabel(label) => {
             Err(ApiError::validation(format!("unknown label {label:?}")))
@@ -799,7 +802,10 @@ pub async fn update(
         .await?;
 
     match outcome {
-        UpdateOutcome::Updated(detail) => Ok(Json(*detail)),
+        UpdateOutcome::Updated(detail) => {
+            state.publish("task.updated", json!({ "task": &detail.task }));
+            Ok(Json(*detail))
+        }
         UpdateOutcome::NotFound => Err(ApiError::not_found("task not found")),
         UpdateOutcome::UnknownLabel(label) => {
             Err(ApiError::validation(format!("unknown label {label:?}")))
@@ -871,6 +877,12 @@ async fn set_archived(
         })
         .await?
         .ok_or_else(|| ApiError::not_found("task not found"))?;
+    let event = if archived {
+        "task.archived"
+    } else {
+        "task.restored"
+    };
+    state.publish(event, json!({ "task": &detail.task }));
     Ok(Json(detail))
 }
 
@@ -894,14 +906,15 @@ pub async fn delete(
         .call(move |connection| {
             let transaction = connection.transaction()?;
             let Some(task) = task_by_ref(&transaction, &reference)? else {
-                return Ok(false);
+                return Ok(None);
             };
             transaction.execute("DELETE FROM tasks WHERE id = ?1", [&task.id])?;
             transaction.commit()?;
-            Ok(true)
+            Ok(Some(task))
         })
         .await?;
-    if deleted {
+    if let Some(task) = deleted {
+        state.publish("task.deleted", json!({ "task": &task }));
         Ok(StatusCode::NO_CONTENT.into_response())
     } else {
         Err(ApiError::not_found("task not found"))

@@ -41,7 +41,7 @@ pub async fn create(
     let id = ids::uuid_v4()?;
     let now = now_millis();
 
-    let comment = state
+    let created = state
         .db
         .call(move |connection| {
             let transaction = connection.transaction()?;
@@ -61,15 +61,23 @@ pub async fn create(
                 &json!({ "comment_id": id }),
             )?;
             transaction.commit()?;
-            Ok(Some(Comment {
-                id,
-                author,
-                body,
-                created_at: now,
-            }))
+            Ok(Some((
+                task.id,
+                Comment {
+                    id,
+                    author,
+                    body,
+                    created_at: now,
+                },
+            )))
         })
         .await?
         .ok_or_else(|| ApiError::not_found("task not found"))?;
+    let (task_id, comment) = created;
+    state.publish(
+        "comment.created",
+        json!({ "task_id": task_id, "comment": &comment }),
+    );
     Ok((StatusCode::CREATED, Json(comment)).into_response())
 }
 
