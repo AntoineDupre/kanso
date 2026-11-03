@@ -36,6 +36,8 @@ curl http://127.0.0.1:8087/api/health
 | `KANSO_PUBLIC_URL` | no | — | Public base URL; `https://` makes the session cookie `Secure` and its host is accepted as a CSRF origin |
 | `KANSO_BIND` | no | `0.0.0.0:8087` | Listen socket address (`IP:port`) |
 | `KANSO_LOG` | no | `info` | `tracing` filter, e.g. `info,kanso=debug` |
+| `KANSO_OPENCHAMBER_URL` | no | — | OpenChamber base URL; enables the optional adapter only together with the token |
+| `KANSO_OPENCHAMBER_TOKEN` | no | — | `oc_client_…` bearer token for OpenChamber; never returned by the API |
 
 Logs go to stdout without ANSI colours, which is journald-friendly. SIGINT and
 SIGTERM trigger a graceful shutdown with a 10-second drain deadline.
@@ -126,8 +128,10 @@ All API responses are JSON except the SSE stream; timestamps are Unix millisecon
 `{"error":{"code":"...","message":"..."}}` with codes `validation`,
 `unauthorized`, `forbidden`, `not_found`, `conflict`, `csrf`, `rate_limited`
 and `internal` (500), plus the specific conflict codes `already_claimed`,
-`not_claimable`, `dependency_unmet`, `not_claimed`, `not_active` and
-`not_proposed`. `GET /api/health` and `POST /api/auth/login` are public; every
+`not_claimable`, `dependency_unmet`, `not_claimed`, `not_active`,
+`not_proposed` and `already_dispatched`. The optional OpenChamber adapter adds
+`integration_disabled`/`integration_unreachable` (503) and
+`openchamber_error` (502). `GET /api/health` and `POST /api/auth/login` are public; every
 other `/api` route needs a session cookie or `Authorization: Bearer kanso_...`.
 
 ### Authentication and meta
@@ -139,6 +143,7 @@ other `/api` route needs a session cookie or `Authorization: Bearer kanso_...`.
 | `GET` | `/api/me` | `{kind:"ui"\|"token", name, scope}` |
 | `GET` | `/api/health` | `{status, version, db}` |
 | `GET` | `/api/events` | Server-Sent Events; cookie or bearer auth |
+| `GET` | `/api/integration` | `{openchamber:{enabled,url,reachable,version}}`; disabled is `{enabled:false}` |
 
 Failed logins are limited to five per minute per client address (`429`,
 `rate_limited`). Cookie-authenticated `POST`/`PATCH`/`DELETE` requests must carry
@@ -174,6 +179,7 @@ case-insensitively.
 | `POST` | `/api/tasks/:ref/claim` | Human or agent; sets `claimed_by`, status → `in_progress` |
 | `POST` | `/api/tasks/:ref/release` | Clears the claim, keeps the column |
 | `POST` | `/api/tasks/:ref/session` | Human only; `{session_id,directory,status?}` with status `running` by default (also `idle`, `waiting`, `failed`, `offline`) |
+| `POST` | `/api/tasks/:ref/dispatch` | Human only; creates an OpenChamber session/worktree for the card when the adapter is enabled |
 | `POST` | `/api/tasks/:ref/dependencies` | `{blocked_by:[ref,…]}` replaces the set; `[]` clears it (human only) |
 | `POST` | `/api/tasks/:ref/archive` | Human only in M2 |
 | `POST` | `/api/tasks/:ref/restore` | Human only in M2 |
@@ -286,7 +292,9 @@ Every task mutation writes an `activity` row (`created`, `proposed`, `updated`,
 `moved`, `blocked`, `unblocked`, `claimed`, `released`, `accepted`, `rejected`,
 `dependencies_changed`, `commented`, `checklist_added`, `checklist_updated`,
 `checklist_removed`, `label_added`, `label_removed`, `session_linked`,
-`archived`, `restored`)
+`dispatched`, `auto_moved`, `session_idle`, `session_failed`,
+`session_offline`, `session_running`, `permission_auto_accept_failed`,
+`dispatch_abandoned`, `archived`, `restored`)
 with a small JSON `data` payload.
 
 The data directory also holds `session.key`, a random 0600 HMAC key used to sign
