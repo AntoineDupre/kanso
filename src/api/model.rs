@@ -174,6 +174,75 @@ pub struct TaskDetail {
     pub dependencies: Dependencies,
 }
 
+/// The small card shape sent by the board endpoints (not the full detail).
+#[derive(Clone, Debug, Serialize)]
+pub struct BoardCard {
+    pub id: String,
+    pub reference: String,
+    pub title: String,
+    pub status: String,
+    pub priority: String,
+    pub due_date: Option<String>,
+    pub labels: Vec<Label>,
+    pub claimed_by: Option<String>,
+    pub attention: bool,
+    pub session_status: Option<String>,
+    pub blocked_from: Option<String>,
+}
+
+impl BoardCard {
+    pub fn from_task(task: &Task) -> Self {
+        Self {
+            id: task.id.clone(),
+            reference: task.reference.clone(),
+            title: task.title.clone(),
+            status: task.status.clone(),
+            priority: task.priority.clone(),
+            due_date: task.due_date.clone(),
+            labels: task.labels.clone(),
+            claimed_by: task.claimed_by.clone(),
+            attention: task.attention,
+            session_status: task.session_status.clone(),
+            blocked_from: task.blocked_from.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct BoardColumns {
+    pub backlog: Vec<BoardCard>,
+    pub todo: Vec<BoardCard>,
+    pub in_progress: Vec<BoardCard>,
+    pub in_review: Vec<BoardCard>,
+    pub blocker: Vec<BoardCard>,
+    pub done: Vec<BoardCard>,
+}
+
+impl BoardColumns {
+    pub fn push(&mut self, card: BoardCard) {
+        match card.status.as_str() {
+            "backlog" => self.backlog.push(card),
+            "todo" => self.todo.push(card),
+            "in_progress" => self.in_progress.push(card),
+            "in_review" => self.in_review.push(card),
+            "blocker" => self.blocker.push(card),
+            "done" => self.done.push(card),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProjectBoard {
+    pub project: Project,
+    pub columns: BoardColumns,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GlobalBoard {
+    pub projects: Vec<ProjectBoard>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct TokenInfo {
     pub id: String,

@@ -80,6 +80,15 @@ mod tests {
     }
 
     #[test]
+    fn between_accepts_exactly_two_min_gaps() {
+        let lower = 0.0;
+        let upper = 2.0 * MIN_GAP;
+        assert_eq!(between(lower, upper), Some(MIN_GAP));
+        assert!(!needs_renumber(lower, upper));
+        assert!(needs_renumber(lower, upper - MIN_GAP / 2.0));
+    }
+
+    #[test]
     fn renumber_is_one_based_and_evenly_spaced() {
         let values: Vec<f64> = renumber(4).collect();
         assert_eq!(values, [1.0, 2.0, 3.0, 4.0]);

@@ -84,7 +84,7 @@ fn validate_name(raw: &str) -> Result<String, ApiError> {
     Ok(name.to_owned())
 }
 
-fn project_by_ref(
+pub(super) fn project_by_ref(
     connection: &rusqlite::Connection,
     reference: &str,
 ) -> crate::error::Result<Option<Project>> {

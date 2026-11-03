@@ -579,6 +579,9 @@ pub async fn list(
     if let Some(task_state) = query.state {
         sql.push_str(" AND t.state = ?");
         values.push(Value::Text(task_state));
+    } else {
+        // Proposals live in the inbox, not in ordinary task listings.
+        sql.push_str(" AND t.state <> 'proposed'");
     }
     if let Some(claimed_by) = query.claimed_by {
         sql.push_str(" AND t.claimed_by = ?");
@@ -629,7 +632,10 @@ pub async fn list(
 }
 
 enum CreateOutcome {
-    Created(Box<TaskDetail>),
+    Created {
+        detail: Box<TaskDetail>,
+        proposal: bool,
+    },
     UnknownProject,
     UnknownLabel(String),
 }
@@ -639,7 +645,7 @@ pub async fn create(
     auth: Auth,
     ApiJson(payload): ApiJson<CreateTask>,
 ) -> Result<Response, ApiError> {
-    require_human(&auth.0)?;
+    let proposal = !auth.0.is_human();
     let title = validate_title(&payload.title)?;
     let description = payload
         .description
@@ -647,9 +653,14 @@ pub async fn create(
         .map(validate_description)
         .transpose()?
         .unwrap_or_default();
-    let status = match payload.status.as_deref() {
-        Some(status) => validate_status(status)?,
-        None => "backlog".to_owned(),
+    let status = if proposal {
+        // Agents cannot create active cards: the status is forced to backlog.
+        "backlog".to_owned()
+    } else {
+        match payload.status.as_deref() {
+            Some(status) => validate_status(status)?,
+            None => "backlog".to_owned(),
+        }
     };
     let priority = match payload.priority.as_deref() {
         Some(priority) => validate_priority(priority)?,
@@ -672,6 +683,9 @@ pub async fn create(
     let actor = auth.0.actor().to_owned();
     let id = ids::uuid_v4()?;
     let now = now_millis();
+    let task_state = if proposal { "proposed" } else { "active" };
+    let source = if proposal { "agent" } else { "human" };
+    let activity = if proposal { "proposed" } else { "created" };
     let outcome = state
         .db
         .call(move |connection| {
@@ -734,7 +748,7 @@ pub async fn create(
                 "INSERT INTO tasks
                  (id, project_id, number, title, description, status, state, rank, priority,
                   due_date, source, created_by, done_at, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, 'human', ?10, ?11, ?12, ?12)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
                 params![
                     id,
                     project_id,
@@ -742,9 +756,11 @@ pub async fn create(
                     title,
                     description,
                     status,
+                    task_state,
                     rank,
                     priority,
                     due_date,
+                    source,
                     actor,
                     done_at,
                     now
@@ -760,7 +776,7 @@ pub async fn create(
                 &transaction,
                 &id,
                 &actor,
-                "created",
+                activity,
                 &json!({ "number": number, "status": status }),
             )?;
             for label_id in &label_ids {
@@ -777,13 +793,21 @@ pub async fn create(
                 .ok_or_else(|| crate::error::Error::msg("created task missing"))?;
             let detail = task_detail(&transaction, task)?;
             transaction.commit()?;
-            Ok(CreateOutcome::Created(Box::new(detail)))
+            Ok(CreateOutcome::Created {
+                detail: Box::new(detail),
+                proposal,
+            })
         })
         .await?;
 
     match outcome {
-        CreateOutcome::Created(detail) => {
-            state.publish("task.created", json!({ "task": &detail.task }));
+        CreateOutcome::Created { detail, proposal } => {
+            let event = if proposal {
+                "proposal.created"
+            } else {
+                "task.created"
+            };
+            state.publish(event, json!({ "task": &detail.task }));
             Ok((StatusCode::CREATED, Json(*detail)).into_response())
         }
         CreateOutcome::UnknownProject => Err(ApiError::not_found("project not found")),

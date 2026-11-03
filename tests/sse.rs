@@ -486,6 +486,104 @@ async fn expired_sessions_stop_existing_streams() {
 }
 
 #[tokio::test]
+async fn proposals_and_dependencies_publish_events() {
+    let app = SseApp::new(Duration::from_millis(100)).await;
+    let cookie = app.login().await;
+    let (_token_id, agent) = app.create_token(&cookie, "agent").await;
+
+    let (status, _, _) = app
+        .request(
+            Method::POST,
+            "/api/projects",
+            Some(json!({"key": "ALP", "name": "Alpha"})),
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let mut client = SseClient::cookie(app.address, &cookie).await;
+
+    let (status, _, _) = app
+        .request(
+            Method::POST,
+            "/api/tasks",
+            Some(json!({"project_key": "ALP", "title": "Idea"})),
+            None,
+            Some(&agent),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(client.next_event().await.event, "proposal.created");
+
+    let (status, _, _) = app
+        .request(
+            Method::POST,
+            "/api/inbox/ALP-1/accept",
+            Some(json!({"status": "todo"})),
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(client.next_event().await.event, "proposal.accepted");
+
+    for title in ["One", "Two"] {
+        let (status, _, _) = app
+            .request(
+                Method::POST,
+                "/api/tasks",
+                Some(json!({"project_key": "ALP", "title": title})),
+                Some(&cookie),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(client.next_event().await.event, "task.created");
+    }
+
+    let (status, _, _) = app
+        .request(
+            Method::POST,
+            "/api/tasks/ALP-2/dependencies",
+            Some(json!({"blocked_by": ["ALP-3"]})),
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let dependencies = client.next_event().await;
+    assert_eq!(dependencies.event, "dependencies.changed");
+    assert_eq!(
+        dependencies.data["data"]["dependencies"]["blocked_by"][0]["reference"],
+        "ALP-3"
+    );
+
+    let (status, _, _) = app
+        .request(
+            Method::POST,
+            "/api/tasks",
+            Some(json!({"project_key": "ALP", "title": "Rejected idea"})),
+            None,
+            Some(&agent),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(client.next_event().await.event, "proposal.created");
+    let (status, _, _) = app
+        .request(
+            Method::POST,
+            "/api/inbox/ALP-4/reject",
+            None,
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(client.next_event().await.event, "proposal.rejected");
+}
+
+#[tokio::test]
 async fn mutations_publish_events_after_commit() {
     let app = SseApp::new(Duration::from_millis(100)).await;
     let cookie = app.login().await;
