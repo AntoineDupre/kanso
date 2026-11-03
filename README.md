@@ -119,8 +119,10 @@ case-insensitively.
 | `POST` | `/api/tasks/:ref/restore` | Human only in M2 |
 | `DELETE` | `/api/tasks/:ref?hard=true` | Human only; cascades to children |
 
-Task numbers are allocated per project inside the create transaction. New cards
-append to their column with the fractional rank helper described in `PLAN.md`.
+`GET /api/tasks` defaults to `state=active`; use `?state=archived` or
+`?state=proposed` for the archive or the proposal inbox. Task numbers are
+allocated per project inside the create transaction. New cards append to their
+column with the fractional rank helper described in `PLAN.md`.
 
 `move` inserts at the top (`before`), bottom (neither neighbour) or between two
 neighbouring cards (`after` is the preceding card and `before` the following

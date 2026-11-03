@@ -1021,6 +1021,8 @@ async fn tasks_create_list_filters_and_refs() {
     let filtered = filtered.body.as_array().expect("array");
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0]["reference"], "BET-1");
+    let default_list = app.get("/api/tasks", Some(&cookie), None).await;
+    assert_eq!(default_list.body.as_array().expect("array").len(), 3);
     let project_id = first["project_id"].as_str().expect("project id");
     let filtered = app
         .get(
@@ -1031,6 +1033,10 @@ async fn tasks_create_list_filters_and_refs() {
         .await;
     assert_eq!(filtered.body.as_array().expect("array").len(), 3);
     let filtered = app.get("/api/tasks?project=BET", Some(&cookie), None).await;
+    assert!(filtered.body.as_array().expect("array").is_empty());
+    let filtered = app
+        .get("/api/tasks?project=BET&state=archived", Some(&cookie), None)
+        .await;
     assert_eq!(filtered.body.as_array().expect("array").len(), 1);
 
     let bulk_project = project_id.to_owned();

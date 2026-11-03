@@ -580,8 +580,9 @@ pub async fn list(
         sql.push_str(" AND t.state = ?");
         values.push(Value::Text(task_state));
     } else {
-        // Proposals live in the inbox, not in ordinary task listings.
-        sql.push_str(" AND t.state <> 'proposed'");
+        // Default listings are the working set: proposals live in the inbox
+        // and archived cards need an explicit ?state=archived.
+        sql.push_str(" AND t.state = 'active'");
     }
     if let Some(claimed_by) = query.claimed_by {
         sql.push_str(" AND t.claimed_by = ?");
