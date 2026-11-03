@@ -13,6 +13,7 @@ use serde::Serialize;
 
 use crate::auth::AuthConfig;
 use crate::db::{self, Database};
+use crate::events::{EventBus, DEFAULT_HEARTBEAT};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -28,6 +29,7 @@ pub struct AppState {
     pub web_dir: PathBuf,
     pub auth: Arc<AuthConfig>,
     pub login_limiter: Arc<crate::auth::LoginLimiter>,
+    pub events: Arc<EventBus>,
     health: Arc<Mutex<Option<HealthCache>>>,
     health_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -40,6 +42,17 @@ struct HealthCache {
 
 impl AppState {
     pub fn new(db: Database, web_dir: PathBuf, auth: AuthConfig) -> Self {
+        Self::with_heartbeat(db, web_dir, auth, DEFAULT_HEARTBEAT)
+    }
+
+    /// Same as [`AppState::new`], with an explicit SSE heartbeat interval.
+    /// Tests use a short interval instead of waiting 25 seconds.
+    pub fn with_heartbeat(
+        db: Database,
+        web_dir: PathBuf,
+        auth: AuthConfig,
+        heartbeat: Duration,
+    ) -> Self {
         let db_path = db.path().to_path_buf();
         Self {
             db,
@@ -47,9 +60,15 @@ impl AppState {
             web_dir,
             auth: Arc::new(auth),
             login_limiter: Arc::new(crate::auth::LoginLimiter::default()),
+            events: Arc::new(EventBus::new(heartbeat)),
             health: Arc::new(Mutex::new(None)),
             health_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Publish an event after a transaction has committed.
+    pub fn publish(&self, kind: &str, data: serde_json::Value) {
+        self.events.publish(kind, data);
     }
 
     fn cached_health(&self, now: Instant) -> Option<bool> {

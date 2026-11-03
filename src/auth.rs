@@ -79,6 +79,9 @@ pub struct Identity {
     pub scope: Scope,
     /// Set for cookie authentication so logout can delete the row.
     pub session_id: Option<String>,
+    /// Set for bearer authentication so a live SSE stream can revalidate the
+    /// exact token row even if its name is ever reused.
+    pub token_id: Option<String>,
 }
 
 impl Identity {

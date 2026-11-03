@@ -22,6 +22,7 @@ use crate::server::AppState;
 mod checklist;
 mod comments;
 mod error;
+mod events;
 mod labels;
 mod model;
 mod projects;
@@ -133,6 +134,7 @@ impl FromRequestParts<AppState> for Auth {
             name: "ui".to_owned(),
             scope: Scope::Human,
             session_id: Some(session_id),
+            token_id: None,
         }))
     }
 }
@@ -172,7 +174,7 @@ async fn token_identity(state: &AppState, token: &str) -> Result<Identity, ApiEr
                         params![now, id],
                     )?;
                 }
-                Ok(Some((name, scope)))
+                Ok(Some((id, name, scope)))
             } else {
                 Ok(None)
             }
@@ -180,11 +182,12 @@ async fn token_identity(state: &AppState, token: &str) -> Result<Identity, ApiEr
         .await?;
 
     match row {
-        Some((name, scope)) => Ok(Identity {
+        Some((id, name, scope)) => Ok(Identity {
             kind: IdentityKind::Token,
             name,
             scope: Scope::parse(&scope).unwrap_or(Scope::Agent),
             session_id: None,
+            token_id: Some(id),
         }),
         None => Err(ApiError::unauthorized("invalid or revoked token")),
     }
@@ -263,6 +266,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/login", post(session::login))
         .route("/api/auth/logout", post(session::logout))
         .route("/api/me", get(session::me))
+        .route("/api/events", get(events::stream))
         .route("/api/projects", get(projects::list).post(projects::create))
         .route(
             "/api/projects/{id}",
