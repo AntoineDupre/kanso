@@ -10,6 +10,32 @@ pub const DEFAULT_DATA_DIR: &str = "/data";
 pub const DEFAULT_BIND: &str = "0.0.0.0:8087";
 pub const DEFAULT_LOG: &str = "info";
 
+/// OpenChamber connection settings; present only when both variables are set.
+#[derive(Clone)]
+pub struct OpenChamberConfig {
+    url: String,
+    token: String,
+}
+
+impl OpenChamberConfig {
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+}
+
+impl fmt::Debug for OpenChamberConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenChamberConfig")
+            .field("url", &self.url)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Runtime configuration, read from the environment.
 #[derive(Clone)]
 pub struct Config {
@@ -18,6 +44,9 @@ pub struct Config {
     pub public_url: Option<String>,
     pub bind: SocketAddr,
     pub log: String,
+    /// `Some` only when both `KANSO_OPENCHAMBER_URL` and
+    /// `KANSO_OPENCHAMBER_TOKEN` are non-empty.
+    pub openchamber: Option<OpenChamberConfig>,
 }
 
 impl Config {
@@ -83,12 +112,31 @@ impl Config {
             .cloned()
             .unwrap_or_else(|| DEFAULT_LOG.to_owned());
 
+        // Both variables are required: setting only one is treated as disabled
+        // rather than failing startup, so the board keeps working without the
+        // optional integration.
+        let openchamber_url = vars
+            .get("KANSO_OPENCHAMBER_URL")
+            .map(|value| value.trim().trim_end_matches('/'))
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let openchamber_token = vars
+            .get("KANSO_OPENCHAMBER_TOKEN")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let openchamber = match (openchamber_url, openchamber_token) {
+            (Some(url), Some(token)) => Some(OpenChamberConfig { url, token }),
+            _ => None,
+        };
+
         Ok(Self {
             password,
             data_dir,
             public_url,
             bind,
             log,
+            openchamber,
         })
     }
 
@@ -109,6 +157,7 @@ impl fmt::Debug for Config {
             .field("public_url", &self.public_url)
             .field("bind", &self.bind)
             .field("log", &self.log)
+            .field("openchamber", &self.openchamber)
             .finish()
     }
 }
@@ -141,6 +190,7 @@ mod tests {
         assert_eq!(config.bind, "0.0.0.0:8087".parse().unwrap());
         assert_eq!(config.log, "info");
         assert_eq!(config.public_url, None);
+        assert!(config.openchamber.is_none());
         assert_eq!(config.db_path(), PathBuf::from("/data/kanso.db"));
     }
 
@@ -174,6 +224,56 @@ mod tests {
         let config = config(&[("KANSO_PASSWORD", "secret")]).unwrap();
         let debug = format!("{config:?}");
         assert!(!debug.contains("secret"), "{debug}");
+        assert!(debug.contains("<redacted>"), "{debug}");
+    }
+
+    #[test]
+    fn openchamber_requires_both_variables() {
+        let enabled = config(&[
+            ("KANSO_PASSWORD", "secret"),
+            ("KANSO_OPENCHAMBER_URL", "http://127.0.0.1:3000/"),
+            ("KANSO_OPENCHAMBER_TOKEN", "oc_client_test"),
+        ])
+        .unwrap()
+        .openchamber
+        .expect("integration");
+        assert_eq!(enabled.url(), "http://127.0.0.1:3000");
+        assert_eq!(enabled.token(), "oc_client_test");
+
+        for vars in [
+            vec![("KANSO_PASSWORD", "secret")],
+            vec![
+                ("KANSO_PASSWORD", "secret"),
+                ("KANSO_OPENCHAMBER_URL", "http://127.0.0.1:3000"),
+            ],
+            vec![
+                ("KANSO_PASSWORD", "secret"),
+                ("KANSO_OPENCHAMBER_TOKEN", "oc_client_test"),
+            ],
+            vec![
+                ("KANSO_PASSWORD", "secret"),
+                ("KANSO_OPENCHAMBER_URL", "  "),
+                ("KANSO_OPENCHAMBER_TOKEN", "oc_client_test"),
+            ],
+        ] {
+            assert!(
+                config(&vars).unwrap().openchamber.is_none(),
+                "{vars:?} should be disabled"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_redacts_the_openchamber_token() {
+        let config = config(&[
+            ("KANSO_PASSWORD", "secret"),
+            ("KANSO_OPENCHAMBER_URL", "http://127.0.0.1:3000"),
+            ("KANSO_OPENCHAMBER_TOKEN", "oc_client_supersecret"),
+        ])
+        .unwrap();
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("oc_client_supersecret"), "{debug}");
+        assert!(debug.contains("127.0.0.1:3000"), "{debug}");
         assert!(debug.contains("<redacted>"), "{debug}");
     }
 }

@@ -28,8 +28,9 @@ mod dependencies;
 mod error;
 mod events;
 mod inbox;
+mod integration;
 mod labels;
-mod model;
+pub(crate) mod model;
 mod projects;
 mod session;
 mod tasks;
@@ -320,6 +321,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/logout", post(session::logout))
         .route("/api/me", get(session::me))
         .route("/api/events", get(events::stream))
+        .route("/api/integration", get(integration::status))
         .route("/api/projects", get(projects::list).post(projects::create))
         .route(
             "/api/projects/{id}",

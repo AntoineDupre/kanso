@@ -30,6 +30,8 @@ pub struct AppState {
     pub auth: Arc<AuthConfig>,
     pub login_limiter: Arc<crate::auth::LoginLimiter>,
     pub events: Arc<EventBus>,
+    /// Present only when both OpenChamber environment variables are set.
+    pub openchamber: Option<Arc<crate::adapter::openchamber::OpenChamber>>,
     health: Arc<Mutex<Option<HealthCache>>>,
     health_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -61,9 +63,20 @@ impl AppState {
             auth: Arc::new(auth),
             login_limiter: Arc::new(crate::auth::LoginLimiter::default()),
             events: Arc::new(EventBus::new(heartbeat)),
+            openchamber: None,
             health: Arc::new(Mutex::new(None)),
             health_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Attach a configured OpenChamber adapter. `kanso serve` starts the
+    /// background poller; tests can drive poll cycles deterministically.
+    pub fn with_openchamber(
+        mut self,
+        openchamber: crate::adapter::openchamber::OpenChamber,
+    ) -> Self {
+        self.openchamber = Some(Arc::new(openchamber));
+        self
     }
 
     /// Publish an event after a transaction has committed.
