@@ -4,55 +4,15 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="kanso-version" content="{{VERSION}}">
+    <meta name="color-scheme" content="light dark">
     <title>Kanso</title>
-    <style>
-      :root {
-        color-scheme: light dark;
-        font-family: system-ui, sans-serif;
-      }
-      body {
-        display: grid;
-        min-height: 100vh;
-        margin: 0;
-        place-items: center;
-        background: #f8fafc;
-        color: #0f172a;
-      }
-      main {
-        max-width: 34rem;
-        padding: 2rem;
-      }
-      h1 {
-        margin: 0 0 0.5rem;
-        font-size: 2.5rem;
-        letter-spacing: -0.04em;
-      }
-      p {
-        color: #475569;
-        line-height: 1.5;
-      }
-      .version {
-        margin-top: 2rem;
-        font-size: 0.75rem;
-        font-variant-numeric: tabular-nums;
-        color: #94a3b8;
-      }
-      @media (prefers-color-scheme: dark) {
-        body {
-          background: #0f172a;
-          color: #e2e8f0;
-        }
-        p {
-          color: #94a3b8;
-        }
-      }
-    </style>
+    <link rel="stylesheet" href="/app.css?v={{VERSION}}">
+    <script src="/vendor/marked.min.js?v={{VERSION}}"></script>
+    <script type="module" src="/app.js?v={{VERSION}}"></script>
   </head>
   <body>
-    <main>
-      <h1>Kanso</h1>
-      <p>A single-user kanban board. The board and its API arrive in later milestones.</p>
-      <p class="version">v{{VERSION}}</p>
-    </main>
+    <div id="app-root"></div>
+    <div id="toasts" aria-live="polite"></div>
+    <div id="modal-root"></div>
   </body>
 </html>
