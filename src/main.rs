@@ -1,24 +1,13 @@
-use std::future::IntoFuture;
-use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
 
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 
-use kanso::auth::AuthConfig;
-use kanso::cli::{Cli, Command};
-use kanso::config::Config;
-use kanso::db;
-use kanso::error::{Error, Result};
-use kanso::server;
-use kanso::web;
+use kanso::cli::{self, Cli};
 
 const EXIT_OK: u8 = 0;
 const EXIT_USAGE: u8 = 1;
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
@@ -33,114 +22,11 @@ async fn main() -> ExitCode {
         }
     };
 
-    match run(cli).await {
+    match cli::run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("kanso: {error}");
-            ExitCode::FAILURE
+            error.print();
+            ExitCode::from(error.exit_code())
         }
     }
-}
-
-async fn run(cli: Cli) -> Result<()> {
-    match cli.command {
-        Command::Serve { port, data_dir } => serve(port, data_dir).await,
-    }
-}
-
-async fn serve(port: Option<u16>, data_dir: Option<PathBuf>) -> Result<()> {
-    let mut config = Config::from_env()?;
-    if let Some(data_dir) = data_dir {
-        config.data_dir = data_dir;
-    }
-    if let Some(port) = port {
-        config.bind.set_port(port);
-    }
-    init_tracing(&config.log)?;
-
-    std::fs::create_dir_all(&config.data_dir).map_err(|error| {
-        Error::msg(format!(
-            "failed to create data directory {}: {error}",
-            config.data_dir.display()
-        ))
-    })?;
-    let db_path = config.db_path();
-    let mut connection = db::open(&db_path).map_err(|error| {
-        Error::msg(format!(
-            "failed to open database {}: {error}",
-            db_path.display()
-        ))
-    })?;
-    let schema_version = db::migrate(&mut connection).map_err(|error| {
-        Error::msg(format!(
-            "failed to migrate database {}: {error}",
-            db_path.display()
-        ))
-    })?;
-    let database = db::Database::from_connection(db_path.clone(), connection);
-    let auth = AuthConfig::load(
-        config.password(),
-        config.public_url.as_deref(),
-        &config.data_dir,
-    )?;
-
-    let web_dir = web::default_web_dir();
-    if !web_dir.join("index.html").is_file() {
-        return Err(Error::msg(format!(
-            "web assets not found: expected {}",
-            web_dir.join("index.html").display()
-        )));
-    }
-    tracing::info!(
-        bind = %config.bind,
-        database = %db_path.display(),
-        web = %web_dir.display(),
-        schema_version,
-        "starting kanso"
-    );
-
-    let app = server::router(server::AppState::new(database, web_dir, auth));
-    let listener = tokio::net::TcpListener::bind(config.bind)
-        .await
-        .map_err(|error| Error::msg(format!("failed to bind {}: {error}", config.bind)))?;
-    tracing::info!(address = %listener.local_addr()?, "kanso listening");
-
-    let (shutdown_started_tx, shutdown_started_rx) = tokio::sync::oneshot::channel::<()>();
-    let shutdown = async move {
-        server::shutdown_signal().await;
-        let _ = shutdown_started_tx.send(());
-    };
-    let server = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .into_future();
-    tokio::pin!(server);
-
-    tokio::select! {
-        result = &mut server => {
-            result.map_err(|error| Error::msg(format!("server error: {error}")))?;
-        }
-        () = async {
-            let _ = shutdown_started_rx.await;
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        } => {
-            tracing::warn!("graceful shutdown timed out; closing remaining connections");
-        }
-    }
-
-    tracing::info!("kanso stopped");
-    Ok(())
-}
-
-fn init_tracing(log: &str) -> Result<()> {
-    let filter = EnvFilter::try_new(log)
-        .map_err(|error| Error::msg(format!("invalid KANSO_LOG value {log:?}: {error}")))?;
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_ansi(false)
-        .with_writer(std::io::stdout)
-        .try_init()
-        .map_err(|error| Error::msg(format!("failed to initialize logging: {error}")))
 }

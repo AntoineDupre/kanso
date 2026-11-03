@@ -12,6 +12,7 @@ RUN mkdir -p src \
     && rm -rf src
 
 COPY src ./src
+COPY skills ./skills
 # The official alpine Rust image targets x86_64-unknown-linux-musl natively,
 # and musl binaries link libc statically by default.
 RUN cargo build --release --locked
