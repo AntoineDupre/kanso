@@ -1281,6 +1281,35 @@ body.resizing-panel * {
   overflow-wrap: anywhere;
 }
 
+.session-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.session-directory {
+  margin: 6px 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.session-link {
+  margin-top: 12px;
+}
+
+.session-link summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.session-link .form-stack {
+  margin-top: 8px;
+}
+
 /* ---------------------------------------------------------------- pages */
 
 .page {
@@ -1425,6 +1454,12 @@ body.resizing-panel * {
 .settings-row-actions {
   display: flex;
   flex-wrap: wrap;
+  gap: 4px;
+}
+
+.settings-env {
+  display: flex;
+  flex-direction: column;
   gap: 4px;
 }
 

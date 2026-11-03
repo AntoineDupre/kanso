@@ -14,7 +14,7 @@ import {
   toast,
   toastForError
 } from "./dom.js";
-import { confirmDialog, openLabelForm, openMoveMenu } from "./forms.js";
+import { confirmDialog, copyText, openLabelForm, openMoveMenu } from "./forms.js";
 
 const STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocker", "done"];
 const PRIORITIES = ["low", "normal", "high"];
@@ -43,11 +43,14 @@ export class Panel {
     this.options = options;
     this.me = options.me || { kind: "ui", name: "ui", scope: "human" };
     this.labels = options.labels || [];
+    this.projects = options.projects || [];
+    this.integration = options.integration || null;
     this.detail = null;
     this.reference = null;
     this.busy = false;
     this.editingDescription = false;
     this.editingItem = null;
+    this.sessionLinkOpen = false;
     this.pendingReload = false;
     this.pendingReloadTimer = null;
     this.drafts = new Map();
@@ -71,6 +74,20 @@ export class Panel {
   setLabels(labels) {
     this.labels = labels || [];
     if (this.detail && !this.editingGuard()) this.render();
+  }
+
+  setProjects(projects) {
+    this.projects = projects || [];
+    if (this.detail && !this.editingGuard()) this.render();
+  }
+
+  setIntegration(integration) {
+    this.integration = integration || null;
+    if (this.detail && !this.editingGuard()) this.render();
+  }
+
+  projectFor(detail) {
+    return this.projects.find((project) => project.id === detail.project_id) || null;
   }
 
   editingGuard() {
@@ -128,6 +145,7 @@ export class Panel {
     this.detail = null;
     this.editingDescription = false;
     this.editingItem = null;
+    this.sessionLinkOpen = false;
     this.clearDrafts();
     this.clearPendingReload();
     this.root.classList.add("open");
@@ -153,6 +171,7 @@ export class Panel {
     this.detail = null;
     this.editingDescription = false;
     this.editingItem = null;
+    this.sessionLinkOpen = false;
     this.clearDrafts();
     this.clearPendingReload();
     this.root.classList.remove("open");
@@ -525,6 +544,7 @@ export class Panel {
       this.renderChecklist(detail, itemDraft),
       this.renderComments(detail),
       this.renderDependencies(detail),
+      this.renderSession(detail),
       this.renderActivity(detail),
       this.renderActions(detail)
     ]);
@@ -1203,6 +1223,114 @@ export class Panel {
     return text === `activity.${entry.kind}` ? entry.kind : text;
   }
 
+  renderSession(detail) {
+    const project = this.projectFor(detail);
+    if (!detail.session_id && !(this.isHuman() && detail.state === "active")) {
+      return null;
+    }
+
+    const children = [];
+    if (detail.session_id) {
+      const copy = el(
+        "button",
+        {
+          type: "button",
+          class: "button button-ghost button-small",
+          onClick: async () => {
+            const copied = await copyText(detail.session_id);
+            if (copied) toast(t("form.copied"), "success");
+            else toast(t("panel.copySessionFailed"), "warning");
+          }
+        },
+        [icon("copy", { size: 13 }), el("span", { text: t("panel.copySession") })]
+      );
+      children.push(
+        el("div", { class: "panel-session" }, [
+          el("p", {
+            class: "muted",
+            text: t("panel.sessionStatus", {
+              status: detail.session_status || t("common.none")
+            })
+          }),
+          el("div", { class: "session-line" }, [
+            el("code", { class: "session-id", text: detail.session_id }),
+            copy
+          ]),
+          detail.session_directory
+            ? el("p", { class: "muted session-directory", text: detail.session_directory })
+            : null
+        ])
+      );
+    } else {
+      children.push(el("p", { class: "muted", text: t("panel.noSession") }));
+    }
+
+    if (this.isHuman() && detail.state === "active" && !detail.session_id) {
+      children.push(this.renderLinkSession(detail, project));
+    }
+    return this.section(t("panel.session"), children, []);
+  }
+
+  renderLinkSession(detail, project) {
+    const sessionId = el("input", {
+      class: "input input-compact",
+      type: "text",
+      placeholder: t("panel.sessionIdPlaceholder"),
+      "aria-label": t("panel.sessionId"),
+      "data-draft": "session-id"
+    });
+    const directory = el("input", {
+      class: "input input-compact",
+      type: "text",
+      value: (project && project.repo_path) || "",
+      placeholder: t("form.exampleRepoPath"),
+      "aria-label": t("panel.sessionDirectory"),
+      "data-draft": "session-directory"
+    });
+    const link = el(
+      "button",
+      {
+        type: "button",
+        class: "button button-secondary button-small",
+        onClick: () => {
+          const session_id = sessionId.value.trim();
+          const dir = directory.value.trim();
+          if (!session_id || !dir) {
+            toast(t("form.requiredFields"), "warning");
+            return;
+          }
+          this.run(
+            api.linkSession(detail.reference, {
+              session_id,
+              directory: dir,
+              status: "running"
+            }),
+            t("toast.sessionLinked")
+          );
+        }
+      },
+      [icon("link", { size: 13 }), el("span", { text: t("panel.linkSessionAction") })]
+    );
+    const details = el("details", { class: "session-link", open: this.sessionLinkOpen }, [
+      el("summary", { text: t("panel.linkSession") }),
+      el("div", { class: "form-stack" }, [
+        el("label", { class: "field" }, [
+          el("span", { class: "field-label", text: t("panel.sessionId") }),
+          sessionId
+        ]),
+        el("label", { class: "field" }, [
+          el("span", { class: "field-label", text: t("panel.sessionDirectory") }),
+          directory
+        ]),
+        link
+      ])
+    ]);
+    details.addEventListener("toggle", () => {
+      this.sessionLinkOpen = details.open;
+    });
+    return details;
+  }
+
   renderActivity(detail) {
     const entries = (detail.activity || []).slice().reverse();
     const list = el("ol", { class: "activity" });
@@ -1242,6 +1370,38 @@ export class Panel {
             onClick: () => this.openMove(detail)
           },
           [icon("board", { size: 14 }), el("span", { text: t("panel.moveTo") })]
+        )
+      );
+    }
+
+    const project = this.projectFor(detail);
+    const canDispatch =
+      human &&
+      detail.state === "active" &&
+      !detail.claimed_by &&
+      this.integration &&
+      this.integration.enabled &&
+      project &&
+      project.repo_path &&
+      project.repo_path.trim();
+
+    if (canDispatch) {
+      actions.push(
+        el(
+          "button",
+          {
+            type: "button",
+            class: "button button-primary button-small",
+            onClick: async () => {
+              const confirmed = await confirmDialog(
+                t("panel.dispatchConfirm", { ref: detail.reference }),
+                { title: t("panel.dispatch"), confirmLabel: t("panel.dispatch") }
+              );
+              if (!confirmed) return;
+              this.run(api.dispatchTask(detail.reference), t("toast.dispatched"));
+            }
+          },
+          [icon("globe", { size: 14 }), el("span", { text: t("panel.dispatch") })]
         )
       );
     }
@@ -1306,17 +1466,7 @@ export class Panel {
 
     if (!actions.length) return null;
 
-    const session = detail.session_id
-      ? el("div", { class: "panel-session" }, [
-          el("h3", { class: "panel-section-title", text: t("panel.session") }),
-          el("p", { class: "muted" }, [
-            t("panel.sessionStatus", { status: detail.session_status || "—" })
-          ]),
-          el("code", { class: "session-id", text: detail.session_id })
-        ])
-      : null;
-
-    return this.section(t("panel.actions"), [el("div", { class: "panel-actions" }, actions), session], []);
+    return this.section(t("panel.actions"), [el("div", { class: "panel-actions" }, actions)], []);
   }
 
   openMove(detail) {

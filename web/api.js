@@ -125,6 +125,12 @@ export const api = {
 
   releaseTask: (reference) => request(`/api/tasks/${enc(reference)}/release`, { method: "POST" }),
 
+  dispatchTask: (reference) =>
+    request(`/api/tasks/${enc(reference)}/dispatch`, { method: "POST" }),
+
+  linkSession: (reference, payload) =>
+    request(`/api/tasks/${enc(reference)}/session`, { method: "POST", body: payload }),
+
   comment: (reference, body) =>
     request(`/api/tasks/${enc(reference)}/comment`, { method: "POST", body: { body } }),
 

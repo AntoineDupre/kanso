@@ -62,6 +62,7 @@ const state = {
   allProjects: [],
   labels: [],
   inbox: [],
+  integration: null,
   boards: [],
   route: { name: "home" },
   routeToken: 0,
@@ -220,6 +221,7 @@ function teardownClient() {
   state.allProjects = [];
   state.labels = [];
   state.inbox = [];
+  state.integration = null;
   state.boards = [];
   state.selectedRef = null;
   state.currentProjectKey = null;
@@ -376,6 +378,8 @@ function buildShell() {
   const panel = new Panel(panelRoot, {
     me: state.me,
     labels: state.labels,
+    projects: state.projects,
+    integration: state.integration,
     width: savedWidth,
     collapsed: savedCollapsed,
     onClose: () => closePanel({ navigate: true }),
@@ -459,8 +463,18 @@ async function loadCore() {
   state.allProjects = projects;
   state.labels = labels;
   state.inbox = inbox;
-  if (state.panel) state.panel.setLabels(labels);
+  if (state.panel) {
+    state.panel.setLabels(labels);
+    state.panel.setProjects(projects);
+  }
   renderChrome();
+  // The version probe can take up to 2 s when OpenChamber is down; never block
+  // the first board render on it. A null response keeps the last known value.
+  api.integration().then((response) => {
+    if (!response || !response.openchamber) return;
+    state.integration = response.openchamber;
+    if (state.panel) state.panel.setIntegration(state.integration);
+  });
 }
 
 function renderChrome() {
@@ -487,7 +501,10 @@ function renderChrome() {
   dom.tabBoard.classList.toggle("active", ["home", "project", "task"].includes(route.name));
   dom.tabGlobal.classList.toggle("active", route.name === "global");
   dom.tabInbox.classList.toggle("active", route.name === "inbox");
-  dom.settings.classList.toggle("active", route.name === "settings-projects" || route.name === "settings-tokens");
+  dom.settings.classList.toggle(
+    "active",
+    ["settings-projects", "settings-tokens", "settings-integration"].includes(route.name)
+  );
   dom.globalToggle.hidden = route.name !== "global";
   dom.search.value = state.search;
   dom.search.closest(".search-box").hidden = !isBoardRoute();
@@ -554,6 +571,7 @@ function parseRoute(pathname) {
   if (path === "/inbox") return { name: "inbox" };
   if (path === "/settings/projects") return { name: "settings-projects" };
   if (path === "/settings/tokens") return { name: "settings-tokens" };
+  if (path === "/settings/integration") return { name: "settings-integration" };
   let match = path.match(/^\/p\/([^/]+)$/);
   if (match) {
     const key = decodePart(match[1]);
@@ -625,6 +643,10 @@ async function renderRoute() {
     case "settings-tokens":
       showPageRegion();
       await renderSettingsTokens(token);
+      break;
+    case "settings-integration":
+      showPageRegion();
+      await renderSettingsIntegration(token);
       break;
     default:
       showPageRegion();
@@ -993,10 +1015,22 @@ function settingsHeader(active) {
     event.preventDefault();
     navigate("/settings/tokens");
   });
+  const integration = el(
+    "a",
+    {
+      class: `settings-tab${active === "integration" ? " active" : ""}`,
+      href: "/settings/integration"
+    },
+    [icon("globe", { size: 15 }), el("span", { text: t("settings.integration") })]
+  );
+  integration.addEventListener("click", (event) => {
+    event.preventDefault();
+    navigate("/settings/integration");
+  });
   return el("header", { class: "page-header" }, [
     el("div", {}, [
       el("h1", { class: "page-title", text: t("settings.title") }),
-      el("nav", { class: "settings-tabs" }, [projects, tokens])
+      el("nav", { class: "settings-tabs" }, [projects, tokens, integration])
     ])
   ]);
 }
@@ -1260,12 +1294,150 @@ async function renderSettingsTokens(token) {
   }
 }
 
+function integrationRow(label, value) {
+  return el("article", { class: "settings-row" }, [
+    el("div", { class: "settings-row-main" }, [
+      el("div", { class: "settings-row-title" }, [
+        el("span", { class: "settings-row-name", text: label })
+      ]),
+      value
+    ])
+  ]);
+}
+
+async function renderSettingsIntegration(token) {
+  if (!state.dom || state.routeToken !== token) return;
+  const human = state.me && state.me.scope === "human";
+  const page = el("div", { class: "page" }, [settingsHeader("integration")]);
+  if (!human) {
+    page.append(
+      el("p", {
+        class: "field-hint",
+        text: t("settings.humanOnly", { what: t("settings.integration") })
+      })
+    );
+    state.dom.pageRegion.replaceChildren(page);
+    return;
+  }
+  state.dom.pageRegion.replaceChildren(
+    el("div", { class: "page-loading" }, [
+      el("span", { class: "spinner", "aria-hidden": "true" }),
+      el("span", { class: "muted", text: t("common.loading") })
+    ])
+  );
+  try {
+    const response = await api.integration();
+    if (state.routeToken !== token) return;
+    if (!response || !response.openchamber) {
+      page.append(
+        el("div", { class: "settings-list" }, [
+          integrationRow(
+            t("settings.integrationStatus"),
+            el("div", { class: "settings-row-main" }, [
+              el("span", {
+                class: "badge badge-warning",
+                text: t("settings.integrationUnavailable")
+              }),
+              el("p", {
+                class: "field-hint",
+                text: t("settings.integrationUnavailableHint")
+              })
+            ])
+          )
+        ])
+      );
+      state.dom.pageRegion.replaceChildren(page);
+      return;
+    }
+    const info = response.openchamber;
+    state.integration = info;
+    if (state.panel) state.panel.setIntegration(info);
+
+    const enabled = Boolean(info.enabled);
+    page.append(
+      el("p", { class: "page-subtitle", text: t("settings.integrationDescription") }),
+      el("div", { class: "settings-list" }, [
+        el("article", { class: "settings-row" }, [
+          icon(enabled ? "globe" : "close", { size: 18 }),
+          el("div", { class: "settings-row-main" }, [
+            el("div", { class: "settings-row-title" }, [
+              el("span", { class: "settings-row-name", text: t("settings.integrationStatus") }),
+              el("span", {
+                class: `badge ${enabled ? "badge-success" : "badge-neutral"}`,
+                text: enabled
+                  ? t("settings.integrationEnabled")
+                  : t("settings.integrationDisabled")
+              })
+            ]),
+            el("p", {
+              class: "muted settings-row-description",
+              text: enabled
+                ? t("settings.integrationEnabledHint")
+                : t("settings.integrationDisabledHint")
+            })
+          ])
+        ])
+      ])
+    );
+
+    if (enabled) {
+      const rows = el("div", { class: "settings-list" });
+      rows.append(
+        integrationRow(
+          t("settings.integrationUrl"),
+          el("code", { class: "settings-row-repo", text: info.url || t("common.none") })
+        ),
+        integrationRow(
+          t("settings.integrationReachable"),
+          el("span", {
+            class: `badge ${info.reachable ? "badge-success" : "badge-warning"}`,
+            text: info.reachable
+              ? t("settings.integrationReachableYes")
+              : t("settings.integrationReachableNo")
+          })
+        ),
+        integrationRow(
+          t("settings.integrationVersion"),
+          el("span", {
+            class: "settings-row-repo",
+            text: info.version || t("common.none")
+          })
+        )
+      );
+      page.append(rows);
+    } else {
+      page.append(
+        el("div", { class: "settings-list" }, [
+          integrationRow(
+            t("settings.integrationEnv"),
+            el("div", { class: "settings-env" }, [
+              el("code", { class: "settings-row-repo", text: "KANSO_OPENCHAMBER_URL" }),
+              el("code", { class: "settings-row-repo", text: "KANSO_OPENCHAMBER_TOKEN" }),
+              el("p", {
+                class: "field-hint",
+                text: t("settings.integrationEnvHint")
+              })
+            ])
+          )
+        ])
+      );
+    }
+    state.dom.pageRegion.replaceChildren(page);
+  } catch (error) {
+    if (state.routeToken !== token) return;
+    if (error.status !== 401) showLoadError(error);
+  }
+}
+
 async function loadProjectsQuietly() {
   try {
     const [projects, labels] = await Promise.all([api.projects(), api.labels()]);
     state.projects = projects;
     state.labels = labels;
-    if (state.panel) state.panel.setLabels(labels);
+    if (state.panel) {
+      state.panel.setLabels(labels);
+      state.panel.setProjects(projects);
+    }
     renderChrome();
   } catch {
     // A transient failure leaves the last known lists; SSE will resync.
@@ -1607,6 +1779,7 @@ async function refreshAfterReconnect() {
     if (state.route.name === "inbox") renderInboxPage();
     if (state.route.name === "settings-projects") await renderSettingsProjects(state.routeToken);
     if (state.route.name === "settings-tokens") await renderSettingsTokens(state.routeToken);
+    if (state.route.name === "settings-integration") await renderSettingsIntegration(state.routeToken);
     // Refetch an open card too, but do not discard an active edit or draft.
     if (state.panel && state.panel.currentReference) await state.panel.reload();
     renderChrome();

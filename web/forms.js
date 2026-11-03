@@ -529,7 +529,7 @@ export function openTokenForm({ onCreated }) {
   return modal;
 }
 
-async function copyText(text) {
+export async function copyText(text) {
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       await navigator.clipboard.writeText(text);
