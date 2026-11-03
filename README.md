@@ -63,10 +63,12 @@ data in the `/data` volume, exposes port 8087 and probes `/api/health`.
 
 ## HTTP surface
 
-All API responses are JSON; timestamps are Unix milliseconds. Failures use
+All API responses are JSON except the SSE stream; timestamps are Unix milliseconds. Failures use
 `{"error":{"code":"...","message":"..."}}` with codes `validation`,
 `unauthorized`, `forbidden`, `not_found`, `conflict`, `csrf`, `rate_limited`
-and `internal` (500). `GET /api/health` and `POST /api/auth/login` are public; every
+and `internal` (500), plus the specific conflict codes `already_claimed`,
+`not_claimable`, `dependency_unmet`, `not_claimed`, `not_active` and
+`not_proposed`. `GET /api/health` and `POST /api/auth/login` are public; every
 other `/api` route needs a session cookie or `Authorization: Bearer kanso_...`.
 
 ### Authentication and meta
@@ -77,11 +79,14 @@ other `/api` route needs a session cookie or `Authorization: Bearer kanso_...`.
 | `POST` | `/api/auth/logout` | Deletes the session and clears the cookie |
 | `GET` | `/api/me` | `{kind:"ui"\|"token", name, scope}` |
 | `GET` | `/api/health` | `{status, version, db}` |
+| `GET` | `/api/events` | Server-Sent Events; cookie or bearer auth |
 
 Failed logins are limited to five per minute per client address (`429`,
 `rate_limited`). Cookie-authenticated `POST`/`PATCH`/`DELETE` requests must carry
 an `Origin` (or `Referer`) whose host matches the request `Host` or
-`KANSO_PUBLIC_URL`; bearer-token requests are exempt from CSRF checks.
+`KANSO_PUBLIC_URL`; bearer-token requests are exempt from CSRF checks. A cookie
+request to `GET /api/agent/next?claim=1` mutates state, so it needs the same
+origin check.
 
 ### Projects
 
@@ -92,6 +97,8 @@ an `Origin` (or `Referer`) whose host matches the request `Host` or
 | `GET` | `/api/projects/:id_or_key` | Case-insensitive key |
 | `PATCH` | `/api/projects/:id` | Name, description, key, colour, repo and OpenChamber fields |
 | `POST` | `/api/projects/:id/archive` | Idempotent |
+| `GET` | `/api/projects/:id_or_key/board` | `{project, columns}` for one project |
+| `GET` | `/api/board` | `{projects:[{project,columns}]}`; `?project=` limits it to one |
 
 Project keys are 2–6 characters of `A-Z`/`0-9`, stored uppercase and unique
 case-insensitively.
@@ -101,15 +108,85 @@ case-insensitively.
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/api/tasks` | `project`, `status`, `state`, `label`, `q`, `claimed_by`, `attention`, `limit` (100, max 500), `offset` |
-| `POST` | `/api/tasks` | `{project_id\|project_key,title,description?,status?,priority?,due_date?,labels?}` |
+| `POST` | `/api/tasks` | `{project_id\|project_key,title,description?,status?,priority?,due_date?,labels?}`; an agent token creates a proposal instead |
 | `GET` | `/api/tasks/:ref` | `ALP-42` (case-insensitive) or UUID; includes labels, checklist, comments, activity and dependencies |
 | `PATCH` | `/api/tasks/:ref` | `title`, `description`, `priority`, `due_date`, `labels`; other fields are rejected |
-| `POST` | `/api/tasks/:ref/archive` | Human only in M1 |
-| `POST` | `/api/tasks/:ref/restore` | Human only in M1 |
+| `POST` | `/api/tasks/:ref/move` | `{status?,before?,after?,restore?}` |
+| `POST` | `/api/tasks/:ref/claim` | Human or agent; sets `claimed_by`, status → `in_progress` |
+| `POST` | `/api/tasks/:ref/release` | Clears the claim, keeps the column |
+| `POST` | `/api/tasks/:ref/dependencies` | `{blocked_by:[ref,…]}` replaces the set; `[]` clears it (human only) |
+| `POST` | `/api/tasks/:ref/archive` | Human only in M2 |
+| `POST` | `/api/tasks/:ref/restore` | Human only in M2 |
 | `DELETE` | `/api/tasks/:ref?hard=true` | Human only; cascades to children |
 
 Task numbers are allocated per project inside the create transaction. New cards
 append to their column with the fractional rank helper described in `PLAN.md`.
+
+`move` inserts at the top (`before`), bottom (neither neighbour) or between two
+neighbouring cards (`after` is the preceding card and `before` the following
+one; both must be adjacent among the visible active cards). When the midpoint
+gap falls below `1e-6`, the target column is renumbered `1..n` in the same
+transaction. Entering `blocker` stores `blocked_from`; `restore:true` returns to
+that column, an explicit `status` wins over `restore`, and a move with neither
+clears `blocked_from`/`blocked_reason` while keeping the card in `blocker`.
+Entering `done` sets `done_at`; leaving it clears the timestamp.
+
+`claim` requires an active card in `backlog`/`todo`, no existing claim, and every
+`blocked_by` card in `done`; failures are `409 already_claimed`,
+`dependency_unmet` or `not_claimable`. `release` returns `409 not_claimed` when
+there is nothing to release. `/api/agent/next` considers only unclaimed active
+cards in `backlog`/`todo`, in non-archived projects, whose `blocked_by` cards are
+all `done`; it returns the best one (`high` priority first, then earliest due
+date with NULLs last, then rank and number) and `204` when none is available.
+`claim=1` claims it atomically in the same transaction. A proposal (`state=proposed`) never appears in `/api/tasks`
+default listings, the board or `next`; `GET /api/tasks?state=proposed` still
+returns it.
+
+Dependencies accept references from any project. A self-dependency or a cycle
+is `400 validation`; an unknown reference is `404 not_found`.
+
+### Inbox
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/api/inbox` | Proposed cards, newest first |
+| `POST` | `/api/inbox/:ref/accept` | Human only; `{status?}`, default `backlog`; appends to the column |
+| `POST` | `/api/inbox/:ref/reject` | Human only; archives the proposal |
+
+Accepting or rejecting a card that is not proposed returns `409 not_proposed`.
+
+### Board shape
+
+`GET /api/projects/:id_or_key/board` returns `{project, columns}` and
+`GET /api/board` returns `{projects:[{project,columns}]}`. `columns` always has
+`backlog`, `todo`, `in_progress`, `in_review`, `blocker` and `done`; each array
+contains active cards ordered by `rank` then `number`. A card carries `id`,
+`reference`, `title`, `status`, `priority`, `due_date`, `labels`, `claimed_by`,
+`attention`, `session_status` and `blocked_from` — not the full detail. The
+global view lists active projects in `position` order; `?project=` resolves one
+project (archived or not).
+
+### Events
+
+`GET /api/events` is a `text/event-stream`. Each frame has `event: <type>`,
+`id: <n>` and a `data:` JSON object `{"id":n,"type":"<type>","data":{…}}`.
+The server sends a `: heartbeat` comment every 25 s. IDs are monotonic inside
+one process and restart at 1 after a restart, so clients refetch on reconnect.
+A lagged or stalled subscriber is disconnected instead of blocking publishers.
+
+Event types include `task.created`, `task.updated`, `task.moved`, `task.claimed`,
+`task.released`, `task.archived`, `task.restored`, `task.deleted`,
+`dependencies.changed`, `proposal.created`, `proposal.accepted`,
+`proposal.rejected`, `project.created`, `project.updated`, `project.archived`,
+`comment.created`, `checklist.created`, `checklist.updated`,
+`checklist.deleted`, `label.created`, `label.updated` and `label.deleted`.
+Task events carry the card summary under `data.task`; `task.moved` also carries
+`from`, `to`, the activity kind (`moved`, `blocked` or `unblocked`) and the
+ordered target `column`; `task.archived`/`task.restored` also carry `column`;
+`dependencies.changed` carries `task` and the full `dependencies` object;
+checklist creation/update events carry `task_id` plus `item` (updates also carry
+the full reordered `checklist`), and `checklist.deleted` carries `task_id` and
+`item_id`. Token and session events are deliberately not broadcast.
 
 ### Labels, checklist, comments and tokens
 
@@ -120,19 +197,23 @@ append to their column with the fractional rank helper described in `PLAN.md`.
 | `POST` | `/api/tasks/:ref/comment` | `{body}`; author is `ui` or the token name |
 | `POST` | `/api/tasks/:ref/checklist` | `{text}` |
 | `PATCH` | `/api/tasks/:ref/checklist/:item` | `{text?,done?,before?,after?}`; `after` names the preceding item and `before` the following one |
-| `DELETE` | `/api/tasks/:ref/checklist/:item` | Human only in M1 |
-| `GET`/`POST` | `/api/tokens` | `{name,scope}`; the `kanso_` token is returned once only |
+| `DELETE` | `/api/tasks/:ref/checklist/:item` | Human only in M2 |
+| `GET`/`POST` | `/api/tokens` | `{name,scope}`; the `kanso_` token is returned once only; `ui` is reserved |
 | `DELETE` | `/api/tokens/:id` | Revoke; repeating it is idempotent |
 
-Agent-scoped tokens may read projects, tasks and labels, comment, and add or
-update checklist items (including reordering them with `before`/`after`). They
-may not create, patch, archive, restore or delete cards, delete checklist items,
-manage projects/labels/tokens, or read the token list. M2 adds move/claim,
-dependencies and proposals.
+Agent-scoped tokens may read projects, tasks, labels, boards, the inbox and
+`/api/agent/next`; claim and release their own claims; move cards between
+`todo`, `in_progress`, `in_review` and `blocker`; comment; add, update and
+reorder checklist items; and create proposals. They may not move a card to `backlog` or `done` (nor move one out of
+`backlog`), release another identity's claim, accept or reject proposals, create
+active cards, edit cards, change dependencies, archive, restore or delete cards,
+delete checklist items, or manage projects/labels/tokens.
 
-Every task mutation writes an `activity` row (`created`, `updated`, `commented`,
-`checklist_added`, `checklist_updated`, `checklist_removed`, `label_added`,
-`label_removed`, `archived`, `restored`) with a small JSON `data` payload.
+Every task mutation writes an `activity` row (`created`, `proposed`, `updated`,
+`moved`, `blocked`, `unblocked`, `claimed`, `released`, `accepted`, `rejected`,
+`dependencies_changed`, `commented`, `checklist_added`, `checklist_updated`,
+`checklist_removed`, `label_added`, `label_removed`, `archived`, `restored`)
+with a small JSON `data` payload.
 
 The data directory also holds `session.key`, a random 0600 HMAC key used to sign
 session cookies; deleting it revokes every UI session.
