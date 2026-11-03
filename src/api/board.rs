@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
@@ -29,10 +31,54 @@ fn load_board(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
 
+    // One checklist aggregate and one blocked set per board, not per card.
+    let mut checklist: HashMap<String, (i64, i64)> = HashMap::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT c.task_id, c.done FROM checklist c
+             JOIN tasks t ON t.id = c.task_id
+             WHERE t.project_id = ?1",
+        )?;
+        let rows = statement.query_map([&project.id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (task_id, done) = row?;
+            let entry = checklist.entry(task_id).or_insert((0, 0));
+            entry.1 += 1;
+            if done != 0 {
+                entry.0 += 1;
+            }
+        }
+    }
+
+    // Keep this predicate in sync with the `blocked_by` check in
+    // `api::tasks::claim_in_transaction`; `blocked` mirrors that dependency
+    // gate only, not claimability as a whole.
+    let mut blocked: HashSet<String> = HashSet::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT d.task_id FROM dependencies d
+             JOIN tasks dependent ON dependent.id = d.task_id
+             JOIN tasks blocker ON blocker.id = d.blocked_by
+             WHERE dependent.project_id = ?1 AND blocker.status <> 'done'",
+        )?;
+        let rows = statement.query_map([&project.id], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            blocked.insert(row?);
+        }
+    }
+
     let mut columns = BoardColumns::default();
     for task in &mut tasks {
         task.labels = load_labels(connection, &task.id)?;
-        columns.push(BoardCard::from_task(task));
+        let (done, total) = checklist.get(&task.id).copied().unwrap_or((0, 0));
+        columns.push(BoardCard::from_task(
+            task,
+            done,
+            total,
+            blocked.contains(&task.id),
+        ));
     }
     Ok(ProjectBoard { project, columns })
 }

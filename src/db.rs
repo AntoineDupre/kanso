@@ -7,7 +7,10 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::error::{Error, Result};
 
 /// Versioned schema migrations. Index + 1 is the `PRAGMA user_version` value.
-pub const MIGRATIONS: &[&str] = &[include_str!("migrations/v1.sql")];
+pub const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/v1.sql"),
+    include_str!("migrations/v2.sql"),
+];
 
 /// Open the database and apply the connection-level pragmas.
 pub fn open(path: &Path) -> Result<Connection> {
@@ -165,13 +168,13 @@ mod tests {
     }
 
     #[test]
-    fn migrates_to_version_one_with_the_full_schema() {
+    fn migrates_to_the_latest_version_with_the_full_schema() {
         let (dir, connection) = migrated_database();
 
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("read user_version");
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
 
         let mut statement = connection
             .prepare(
@@ -214,6 +217,7 @@ mod tests {
             .expect("collect indexes");
         for expected in [
             "activity_task",
+            "checklist_task",
             "comments_task",
             "dependencies_rev",
             "tasks_board",
@@ -231,13 +235,67 @@ mod tests {
         let path = dir.path().join("kanso.db");
         let mut connection = open(&path).expect("open database");
 
-        assert_eq!(migrate(&mut connection).expect("first migration"), 1);
-        assert_eq!(migrate(&mut connection).expect("second migration"), 1);
+        assert_eq!(migrate(&mut connection).expect("first migration"), 2);
+        assert_eq!(migrate(&mut connection).expect("second migration"), 2);
 
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("read user_version");
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn upgrade_from_v1_keeps_data_and_adds_the_checklist_index() {
+        let dir = TempDir::new();
+        let path = dir.path().join("kanso.db");
+        let mut connection = open(&path).expect("open database");
+        assert_eq!(
+            apply(&mut connection, &MIGRATIONS[..1]).expect("migrate to v1"),
+            1
+        );
+
+        connection
+            .execute_batch(
+                "INSERT INTO projects (id, key, name, position, created_at, updated_at)
+                   VALUES ('p1', 'ALP', 'Alpha', 1.0, 1, 1);
+                 INSERT INTO tasks
+                   (id, project_id, number, title, status, rank, created_at, updated_at)
+                   VALUES ('t1', 'p1', 1, 'First', 'todo', 1.0, 1, 1);
+                 INSERT INTO checklist (id, task_id, text, done, position)
+                   VALUES ('c1', 't1', 'step', 1, 1.0);",
+            )
+            .expect("seed v1 rows");
+
+        assert_eq!(migrate(&mut connection).expect("migrate to v2"), 2);
+
+        let mut statement = connection
+            .prepare("PRAGMA index_info('checklist_task')")
+            .expect("prepare index info");
+        let columns: Vec<String> = statement
+            .query_map([], |row| row.get(2))
+            .expect("query index info")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect index info");
+        assert_eq!(columns, ["task_id"]);
+
+        let mut statement = connection
+            .prepare("PRAGMA index_list('checklist')")
+            .expect("prepare index list");
+        let indexes: Vec<String> = statement
+            .query_map([], |row| row.get(1))
+            .expect("query index list")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect index list");
+        assert!(indexes.iter().any(|name| name == "checklist_task"));
+
+        let row: (String, String, i64) = connection
+            .query_row(
+                "SELECT id, task_id, done FROM checklist WHERE id = 'c1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read seeded checklist row");
+        assert_eq!(row, ("c1".to_owned(), "t1".to_owned(), 1));
     }
 
     #[test]

@@ -188,10 +188,20 @@ pub struct BoardCard {
     pub attention: bool,
     pub session_status: Option<String>,
     pub blocked_from: Option<String>,
+    /// Checklist progress so cards can show `2/3` without opening each card.
+    pub checklist_done: i64,
+    pub checklist_total: i64,
+    /// At least one `blocked_by` card is not done; shown as a lock on the card.
+    pub blocked: bool,
 }
 
 impl BoardCard {
-    pub fn from_task(task: &Task) -> Self {
+    pub fn from_task(
+        task: &Task,
+        checklist_done: i64,
+        checklist_total: i64,
+        blocked: bool,
+    ) -> Self {
         Self {
             id: task.id.clone(),
             reference: task.reference.clone(),
@@ -204,6 +214,9 @@ impl BoardCard {
             attention: task.attention,
             session_status: task.session_status.clone(),
             blocked_from: task.blocked_from.clone(),
+            checklist_done,
+            checklist_total,
+            blocked,
         }
     }
 }

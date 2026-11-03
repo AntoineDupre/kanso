@@ -2953,6 +2953,53 @@ async fn board_grouping_ordering_isolation_and_global_view() {
         &cookie,
     )
     .await;
+    app.cookie_post(
+        "/api/tasks/ALP-1/checklist",
+        Some(json!({"text": "first step"})),
+        &cookie,
+    )
+    .await;
+    let checked = app
+        .cookie_post(
+            "/api/tasks/ALP-7/checklist",
+            Some(json!({"text": "finished step"})),
+            &cookie,
+        )
+        .await;
+    let checked_id = checked.body["id"].as_str().expect("checklist item id");
+    app.cookie_patch(
+        &format!("/api/tasks/ALP-7/checklist/{checked_id}"),
+        json!({"done": true}),
+        &cookie,
+    )
+    .await;
+    app.cookie_post(
+        "/api/tasks/ALP-2/dependencies",
+        Some(json!({"blocked_by": ["ALP-1"]})),
+        &cookie,
+    )
+    .await;
+    let unblocked = app
+        .create_task(
+            &cookie,
+            json!({"project_key": "ALP", "title": "Already unblocked"}),
+        )
+        .await;
+    let dependency = app
+        .cookie_post(
+            &format!(
+                "/api/tasks/{}/dependencies",
+                unblocked["reference"].as_str().expect("reference")
+            ),
+            Some(json!({"blocked_by": ["ALP-7"]})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(dependency.status, StatusCode::OK, "{:?}", dependency.body);
+    assert_eq!(
+        dependency.body["dependencies"]["blocked_by"][0]["reference"],
+        "ALP-7"
+    );
 
     let board = app
         .get("/api/projects/ALP/board", Some(&cookie), None)
@@ -2987,6 +3034,20 @@ async fn board_grouping_ordering_isolation_and_global_view() {
         board.body["columns"]["blocker"][0]["blocked_from"],
         "backlog"
     );
+    assert_eq!(backlog[1]["checklist_done"], 0);
+    assert_eq!(backlog[1]["checklist_total"], 1);
+    assert_eq!(backlog[0]["blocked"], true);
+    assert_eq!(backlog[1]["blocked"], false);
+    // A dependency on a done card is not a lock; a card without a checklist
+    // reports zero progress instead of omitting the counters.
+    assert_eq!(backlog[2]["reference"], unblocked["reference"]);
+    assert_eq!(backlog[2]["blocked"], false);
+    assert_eq!(backlog[2]["checklist_done"], 0);
+    assert_eq!(backlog[2]["checklist_total"], 0);
+    let done_card = &board.body["columns"]["done"][0];
+    assert_eq!(done_card["reference"], "ALP-7");
+    assert_eq!(done_card["checklist_done"], 1);
+    assert_eq!(done_card["checklist_total"], 1);
 
     let other = app
         .get("/api/projects/BET/board", Some(&cookie), None)

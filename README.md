@@ -164,9 +164,12 @@ Accepting or rejecting a card that is not proposed returns `409 not_proposed`.
 `backlog`, `todo`, `in_progress`, `in_review`, `blocker` and `done`; each array
 contains active cards ordered by `rank` then `number`. A card carries `id`,
 `reference`, `title`, `status`, `priority`, `due_date`, `labels`, `claimed_by`,
-`attention`, `session_status` and `blocked_from` — not the full detail. The
-global view lists active projects in `position` order; `?project=` resolves one
-project (archived or not).
+`attention`, `session_status`, `blocked_from`, `checklist_done`,
+`checklist_total` and `blocked` (an unfinished `blocked_by` card) — not the full
+detail. The checklist counters and `blocked` flag are additions needed by the
+web cards, which show `2/3` progress and a lock without fetching every detail.
+The global view lists active projects in `position` order; `?project=` resolves
+one project (archived or not).
 
 ### Events
 
