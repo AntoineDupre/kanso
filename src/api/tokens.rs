@@ -35,6 +35,11 @@ fn validate_name(raw: &str) -> Result<String, ApiError> {
             "token name must be at most 64 characters",
         ));
     }
+    if name.eq_ignore_ascii_case("ui") {
+        return Err(ApiError::validation(
+            "token name \"ui\" is reserved for the browser session",
+        ));
+    }
     Ok(name.to_owned())
 }
 
@@ -176,5 +181,7 @@ mod tests {
         assert_eq!(validate_name(" build ").expect("name"), "build");
         assert!(validate_name("").is_err());
         assert!(validate_name(&"x".repeat(65)).is_err());
+        assert!(validate_name("ui").is_err());
+        assert!(validate_name("UI").is_err());
     }
 }

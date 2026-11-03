@@ -535,6 +535,38 @@ async fn mutations_publish_events_after_commit() {
     let (status, _, _) = app
         .request(
             Method::POST,
+            "/api/tasks",
+            Some(json!({"project_key": "ALP", "title": "Second"})),
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(client.next_event().await.event, "task.created");
+
+    let (status, _, _) = app
+        .request(
+            Method::POST,
+            &format!("/api/tasks/{reference}/move"),
+            Some(json!({"status": "backlog", "before": "ALP-2"})),
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let moved = client.next_event().await;
+    assert_eq!(moved.event, "task.moved");
+    assert_eq!(moved.data["data"]["activity"], "moved");
+    let column = moved.data["data"]["column"]
+        .as_array()
+        .expect("moved column");
+    assert_eq!(column.len(), 2);
+    assert_eq!(column[0]["reference"], "ALP-1");
+    assert_eq!(column[1]["reference"], "ALP-2");
+
+    let (status, _, _) = app
+        .request(
+            Method::POST,
             &format!("/api/tasks/{reference}/archive"),
             None,
             Some(&cookie),

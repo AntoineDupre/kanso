@@ -19,6 +19,7 @@ use crate::auth::{
 use crate::ids;
 use crate::server::AppState;
 
+mod agent;
 mod checklist;
 mod comments;
 mod error;
@@ -280,6 +281,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/tasks/{reference}/archive", post(tasks::archive))
         .route("/api/tasks/{reference}/restore", post(tasks::restore))
+        .route("/api/tasks/{reference}/move", post(tasks::move_task))
+        .route("/api/tasks/{reference}/claim", post(tasks::claim))
+        .route("/api/tasks/{reference}/release", post(tasks::release))
+        .route("/api/agent/next", get(agent::next))
         .route("/api/tasks/{reference}/comment", post(comments::create))
         .route("/api/tasks/{reference}/checklist", post(checklist::create))
         .route(

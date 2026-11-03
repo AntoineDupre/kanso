@@ -72,6 +72,15 @@ pub struct UpdateTask {
     labels: Option<Vec<String>>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveTask {
+    status: Option<String>,
+    before: Option<String>,
+    after: Option<String>,
+    restore: Option<bool>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum TaskReference {
     Id(String),
@@ -357,6 +366,169 @@ pub fn task_detail(
         dependencies: load_dependencies(connection, &task.id)?,
         task,
     })
+}
+
+const AGENT_MOVE_STATUSES: [&str; 4] = ["todo", "in_progress", "in_review", "blocker"];
+
+#[derive(Debug)]
+enum RankError {
+    Missing(String),
+    InvalidOrder,
+}
+
+fn ordered_column_except(
+    connection: &rusqlite::Connection,
+    project_id: &str,
+    status: &str,
+    task_id: &str,
+) -> crate::error::Result<Vec<(String, f64)>> {
+    let mut statement = connection.prepare(
+        "SELECT id, rank FROM tasks
+         WHERE project_id = ?1 AND status = ?2 AND state = 'active' AND id <> ?3
+         ORDER BY rank, number",
+    )?;
+    let items = statement
+        .query_map(params![project_id, status, task_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(items)
+}
+
+/// Ordered active cards in one column, sent with `task.moved` so clients can
+/// apply a renumber without refetching the whole board.
+fn column_ranks(
+    connection: &rusqlite::Connection,
+    project_id: &str,
+    status: &str,
+) -> crate::error::Result<Vec<serde_json::Value>> {
+    let mut statement = connection.prepare(
+        "SELECT t.id, p.key, t.number, t.rank FROM tasks t
+         JOIN projects p ON p.id = t.project_id
+         WHERE t.project_id = ?1 AND t.status = ?2 AND t.state = 'active'
+         ORDER BY t.rank, t.number",
+    )?;
+    let rows = statement
+        .query_map(params![project_id, status], |row| {
+            let id: String = row.get(0)?;
+            let key: String = row.get(1)?;
+            let number: i64 = row.get(2)?;
+            let rank: f64 = row.get(3)?;
+            Ok(json!({
+                "id": id,
+                "reference": format!("{key}-{number}"),
+                "rank": rank,
+            }))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Resolve a target rank from `after` (preceding neighbour) and `before`
+/// (following neighbour). Returns the rank and the insertion index.
+fn intended_rank(
+    items: &[(String, f64)],
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Result<(Option<f64>, usize), RankError> {
+    let index_of = |id: &str| {
+        items
+            .iter()
+            .position(|(item_id, _)| item_id == id)
+            .ok_or_else(|| RankError::Missing(id.to_owned()))
+    };
+
+    let insert_at = match (after, before) {
+        (Some(after), Some(before)) => {
+            let after_index = index_of(after)?;
+            let before_index = index_of(before)?;
+            if after_index + 1 != before_index {
+                return Err(RankError::InvalidOrder);
+            }
+            before_index
+        }
+        (Some(after), None) => index_of(after)? + 1,
+        (None, Some(before)) => index_of(before)?,
+        (None, None) => items.len(),
+    };
+
+    let lower = insert_at
+        .checked_sub(1)
+        .and_then(|index| items.get(index))
+        .map(|(_, rank)| *rank);
+    let upper = items.get(insert_at).map(|(_, rank)| *rank);
+    if let (Some(lower), Some(upper)) = (lower, upper) {
+        if lower > upper {
+            return Err(RankError::InvalidOrder);
+        }
+    }
+
+    let rank = match (lower, upper) {
+        (Some(lower), Some(upper)) => rank::between(lower, upper),
+        (Some(lower), None) => Some(lower + 1.0),
+        (None, Some(upper)) => Some(upper - 1.0),
+        (None, None) => Some(1.0),
+    };
+    Ok((rank, insert_at))
+}
+
+#[derive(Debug)]
+pub(super) enum ClaimOutcome {
+    Claimed,
+    AlreadyClaimed,
+    NotClaimable,
+    DependencyUnmet,
+}
+
+/// Claim `task` in the caller's transaction: gate on state/status/dependencies,
+/// move it to the end of `in_progress`, and record the activity row.
+pub(super) fn claim_in_transaction(
+    connection: &rusqlite::Connection,
+    task: &Task,
+    actor: &str,
+    now: i64,
+) -> crate::error::Result<ClaimOutcome> {
+    if task.claimed_by.is_some() {
+        return Ok(ClaimOutcome::AlreadyClaimed);
+    }
+    if task.state != "active" || !matches!(task.status.as_str(), "backlog" | "todo") {
+        return Ok(ClaimOutcome::NotClaimable);
+    }
+
+    let unmet: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM dependencies d
+         JOIN tasks blocked ON blocked.id = d.blocked_by
+         WHERE d.task_id = ?1 AND blocked.status <> 'done'",
+        [&task.id],
+        |row| row.get(0),
+    )?;
+    if unmet > 0 {
+        return Ok(ClaimOutcome::DependencyUnmet);
+    }
+
+    let max_rank: Option<f64> = connection.query_row(
+        "SELECT MAX(rank) FROM tasks WHERE project_id = ?1 AND status = 'in_progress'",
+        [&task.project_id],
+        |row| row.get(0),
+    )?;
+    let rank = rank::append(max_rank);
+    let changed = connection.execute(
+        "UPDATE tasks SET claimed_by = ?1, status = 'in_progress', rank = ?2, updated_at = ?3
+         WHERE id = ?4 AND claimed_by IS NULL",
+        params![actor, rank, now, task.id],
+    )?;
+    if changed == 0 {
+        return Ok(ClaimOutcome::AlreadyClaimed);
+    }
+
+    insert_activity(
+        connection,
+        &task.id,
+        actor,
+        "claimed",
+        &json!({ "from": task.status, "to": "in_progress" }),
+    )?;
+    Ok(ClaimOutcome::Claimed)
 }
 
 fn escape_like(value: &str) -> String {
@@ -813,6 +985,345 @@ pub async fn update(
     }
 }
 
+enum MoveOutcome {
+    Moved {
+        detail: Box<TaskDetail>,
+        from: String,
+        to: String,
+        activity: &'static str,
+        column: Vec<serde_json::Value>,
+    },
+    NotFound,
+    NotActive,
+    RestoreWithoutBlocker,
+    MissingNeighbour(String),
+    InvalidOrder,
+    Forbidden,
+}
+
+pub async fn move_task(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(reference): Path<String>,
+    ApiJson(payload): ApiJson<MoveTask>,
+) -> Result<Json<TaskDetail>, ApiError> {
+    let explicit_status = payload.status.as_deref().map(validate_status).transpose()?;
+    let restore = payload.restore.unwrap_or(false);
+    let before = payload.before;
+    let after = payload.after;
+    let agent = !auth.0.is_human();
+    let actor = auth.0.actor().to_owned();
+    let now = now_millis();
+
+    let outcome = state
+        .db
+        .call(move |connection| {
+            let transaction = connection.transaction()?;
+            let Some(task) = task_by_ref(&transaction, &reference)? else {
+                return Ok(MoveOutcome::NotFound);
+            };
+            if task.state != "active" {
+                return Ok(MoveOutcome::NotActive);
+            }
+
+            let current = task.status.clone();
+            let target = match &explicit_status {
+                Some(status) => status.clone(),
+                None if restore => {
+                    if current != "blocker" {
+                        return Ok(MoveOutcome::RestoreWithoutBlocker);
+                    }
+                    match task.blocked_from.clone() {
+                        Some(status) => status,
+                        None => return Ok(MoveOutcome::RestoreWithoutBlocker),
+                    }
+                }
+                None => current.clone(),
+            };
+
+            if agent
+                && (!AGENT_MOVE_STATUSES.contains(&current.as_str())
+                    || !AGENT_MOVE_STATUSES.contains(&target.as_str()))
+            {
+                return Ok(MoveOutcome::Forbidden);
+            }
+
+            let entering_blocker = target == "blocker" && current != "blocker";
+            let leaving_blocker = current == "blocker" && target != "blocker";
+            // No status and no restore on a blocker card clears its blocker
+            // metadata but leaves it in place.
+            let clear_blocker_in_place = current == "blocker"
+                && target == "blocker"
+                && explicit_status.is_none()
+                && !restore;
+
+            let blocked_from = if entering_blocker {
+                Some(current.clone())
+            } else if leaving_blocker || clear_blocker_in_place {
+                None
+            } else {
+                task.blocked_from.clone()
+            };
+            let blocked_reason = if leaving_blocker || clear_blocker_in_place {
+                None
+            } else {
+                task.blocked_reason.clone()
+            };
+            let done_at = if target == "done" {
+                if current == "done" {
+                    task.done_at.or(Some(now))
+                } else {
+                    Some(now)
+                }
+            } else {
+                None
+            };
+
+            let items = ordered_column_except(&transaction, &task.project_id, &target, &task.id)?;
+            let before_id = match before.as_deref() {
+                Some(reference) => match task_by_ref(&transaction, reference)? {
+                    Some(neighbour) => Some(neighbour.id),
+                    None => return Ok(MoveOutcome::MissingNeighbour(reference.to_owned())),
+                },
+                None => None,
+            };
+            let after_id = match after.as_deref() {
+                Some(reference) => match task_by_ref(&transaction, reference)? {
+                    Some(neighbour) => Some(neighbour.id),
+                    None => return Ok(MoveOutcome::MissingNeighbour(reference.to_owned())),
+                },
+                None => None,
+            };
+            let (computed, insert_at) =
+                match intended_rank(&items, before_id.as_deref(), after_id.as_deref()) {
+                    Ok(value) => value,
+                    Err(RankError::Missing(id)) => return Ok(MoveOutcome::MissingNeighbour(id)),
+                    Err(RankError::InvalidOrder) => return Ok(MoveOutcome::InvalidOrder),
+                };
+
+            let rank = match computed {
+                Some(rank) => rank,
+                None => {
+                    // Renumber the whole target column with the moved card in
+                    // its new position, atomically with the move.
+                    let mut full = items.clone();
+                    full.insert(insert_at, (task.id.clone(), 0.0));
+                    for (index, (id, _)) in full.iter().enumerate() {
+                        transaction.execute(
+                            "UPDATE tasks SET rank = ?1 WHERE id = ?2",
+                            params![(index + 1) as f64, id],
+                        )?;
+                    }
+                    (insert_at + 1) as f64
+                }
+            };
+
+            transaction.execute(
+                "UPDATE tasks
+                 SET status = ?1, rank = ?2, blocked_from = ?3, blocked_reason = ?4,
+                     done_at = ?5, updated_at = ?6
+                 WHERE id = ?7",
+                params![
+                    target,
+                    rank,
+                    blocked_from,
+                    blocked_reason,
+                    done_at,
+                    now,
+                    task.id
+                ],
+            )?;
+
+            let activity = if entering_blocker {
+                "blocked"
+            } else if leaving_blocker || clear_blocker_in_place {
+                "unblocked"
+            } else {
+                "moved"
+            };
+            insert_activity(
+                &transaction,
+                &task.id,
+                &actor,
+                activity,
+                &json!({ "from": current, "to": target, "rank": rank }),
+            )?;
+
+            let task = task_by_ref(&transaction, &task.id)?
+                .ok_or_else(|| crate::error::Error::msg("moved task missing"))?;
+            let detail = task_detail(&transaction, task)?;
+            let column = column_ranks(&transaction, &detail.task.project_id, &detail.task.status)?;
+            transaction.commit()?;
+            Ok(MoveOutcome::Moved {
+                detail: Box::new(detail),
+                from: current,
+                to: target,
+                activity,
+                column,
+            })
+        })
+        .await?;
+
+    match outcome {
+        MoveOutcome::Moved {
+            detail,
+            from,
+            to,
+            activity,
+            column,
+        } => {
+            state.publish(
+                "task.moved",
+                json!({
+                    "task": &detail.task,
+                    "from": from,
+                    "to": to,
+                    "activity": activity,
+                    "column": column,
+                }),
+            );
+            Ok(Json(*detail))
+        }
+        MoveOutcome::NotFound => Err(ApiError::not_found("task not found")),
+        MoveOutcome::NotActive => Err(ApiError::conflict_code(
+            "not_active",
+            "only active cards can be moved",
+        )),
+        MoveOutcome::RestoreWithoutBlocker => Err(ApiError::validation(
+            "restore is only valid from blocker with a recorded blocked_from",
+        )),
+        MoveOutcome::MissingNeighbour(id) => Err(ApiError::validation(format!(
+            "neighbour {id:?} is not in the target column"
+        ))),
+        MoveOutcome::InvalidOrder => Err(ApiError::validation(
+            "before must directly follow after in the target column",
+        )),
+        MoveOutcome::Forbidden => Err(ApiError::forbidden(
+            "agents may only move cards between todo, in_progress, in_review and blocker",
+        )),
+    }
+}
+
+enum ClaimResult {
+    Claimed(Box<TaskDetail>),
+    NotFound,
+    AlreadyClaimed,
+    NotClaimable,
+    DependencyUnmet,
+}
+
+pub async fn claim(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(reference): Path<String>,
+) -> Result<Json<TaskDetail>, ApiError> {
+    let actor = auth.0.actor().to_owned();
+    let now = now_millis();
+    let outcome = state
+        .db
+        .call(move |connection| {
+            let transaction = connection.transaction()?;
+            let Some(task) = task_by_ref(&transaction, &reference)? else {
+                return Ok(ClaimResult::NotFound);
+            };
+            match claim_in_transaction(&transaction, &task, &actor, now)? {
+                ClaimOutcome::Claimed => {
+                    let task = task_by_ref(&transaction, &task.id)?
+                        .ok_or_else(|| crate::error::Error::msg("claimed task missing"))?;
+                    let detail = task_detail(&transaction, task)?;
+                    transaction.commit()?;
+                    Ok(ClaimResult::Claimed(Box::new(detail)))
+                }
+                ClaimOutcome::AlreadyClaimed => Ok(ClaimResult::AlreadyClaimed),
+                ClaimOutcome::NotClaimable => Ok(ClaimResult::NotClaimable),
+                ClaimOutcome::DependencyUnmet => Ok(ClaimResult::DependencyUnmet),
+            }
+        })
+        .await?;
+
+    match outcome {
+        ClaimResult::Claimed(detail) => {
+            state.publish("task.claimed", json!({ "task": &detail.task }));
+            Ok(Json(*detail))
+        }
+        ClaimResult::NotFound => Err(ApiError::not_found("task not found")),
+        ClaimResult::AlreadyClaimed => Err(ApiError::conflict_code(
+            "already_claimed",
+            "card is already claimed",
+        )),
+        ClaimResult::NotClaimable => Err(ApiError::conflict_code(
+            "not_claimable",
+            "only active backlog or todo cards can be claimed",
+        )),
+        ClaimResult::DependencyUnmet => Err(ApiError::conflict_code(
+            "dependency_unmet",
+            "every blocked_by card must be done before claiming",
+        )),
+    }
+}
+
+enum ReleaseResult {
+    Released(Box<TaskDetail>),
+    NotFound,
+    NotClaimed,
+    Forbidden,
+}
+
+pub async fn release(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(reference): Path<String>,
+) -> Result<Json<TaskDetail>, ApiError> {
+    let actor = auth.0.actor().to_owned();
+    let human = auth.0.is_human();
+    let now = now_millis();
+    let outcome = state
+        .db
+        .call(move |connection| {
+            let transaction = connection.transaction()?;
+            let Some(task) = task_by_ref(&transaction, &reference)? else {
+                return Ok(ReleaseResult::NotFound);
+            };
+            let Some(claimed_by) = task.claimed_by.clone() else {
+                return Ok(ReleaseResult::NotClaimed);
+            };
+            if !human && claimed_by != actor {
+                return Ok(ReleaseResult::Forbidden);
+            }
+            transaction.execute(
+                "UPDATE tasks SET claimed_by = NULL, updated_at = ?1 WHERE id = ?2",
+                params![now, task.id],
+            )?;
+            insert_activity(
+                &transaction,
+                &task.id,
+                &actor,
+                "released",
+                &json!({ "claimed_by": claimed_by }),
+            )?;
+            let task = task_by_ref(&transaction, &task.id)?
+                .ok_or_else(|| crate::error::Error::msg("released task missing"))?;
+            let detail = task_detail(&transaction, task)?;
+            transaction.commit()?;
+            Ok(ReleaseResult::Released(Box::new(detail)))
+        })
+        .await?;
+
+    match outcome {
+        ReleaseResult::Released(detail) => {
+            state.publish("task.released", json!({ "task": &detail.task }));
+            Ok(Json(*detail))
+        }
+        ReleaseResult::NotFound => Err(ApiError::not_found("task not found")),
+        ReleaseResult::NotClaimed => {
+            Err(ApiError::conflict_code("not_claimed", "card has no claim"))
+        }
+        ReleaseResult::Forbidden => Err(ApiError::forbidden(
+            "an agent may only release its own claim",
+        )),
+    }
+}
+
 pub async fn archive(
     State(state): State<AppState>,
     auth: Auth,
@@ -867,22 +1378,57 @@ async fn set_archived(
                         params![now, task.id],
                     )?;
                     insert_activity(&transaction, &task.id, &actor, "restored", &json!({}))?;
+                    // A card archived earlier may hold a rank that was reused
+                    // while it was hidden. Renumber the visible column so no
+                    // duplicate rank reaches the board.
+                    let duplicate = transaction
+                        .query_row(
+                            "SELECT 1 FROM tasks
+                             WHERE project_id = ?1 AND status = ?2 AND state = 'active'
+                               AND rank = ?3 AND id <> ?4",
+                            params![task.project_id, task.status, task.rank, task.id],
+                            |_| Ok(()),
+                        )
+                        .optional()?
+                        .is_some();
+                    if duplicate {
+                        let ids = {
+                            let mut statement = transaction.prepare(
+                                "SELECT id FROM tasks
+                                 WHERE project_id = ?1 AND status = ?2 AND state = 'active'
+                                 ORDER BY rank, number",
+                            )?;
+                            let rows = statement
+                                .query_map(params![task.project_id, task.status], |row| {
+                                    row.get::<_, String>(0)
+                                })?;
+                            rows.collect::<rusqlite::Result<Vec<_>>>()?
+                        };
+                        for (index, id) in ids.iter().enumerate() {
+                            transaction.execute(
+                                "UPDATE tasks SET rank = ?1 WHERE id = ?2",
+                                params![(index + 1) as f64, id],
+                            )?;
+                        }
+                    }
                 }
             }
             let task = task_by_ref(&transaction, &task.id)?
                 .ok_or_else(|| crate::error::Error::msg("task missing"))?;
             let detail = task_detail(&transaction, task)?;
+            let column = column_ranks(&transaction, &detail.task.project_id, &detail.task.status)?;
             transaction.commit()?;
-            Ok(Some(detail))
+            Ok(Some((detail, column)))
         })
         .await?
         .ok_or_else(|| ApiError::not_found("task not found"))?;
+    let (detail, column) = detail;
     let event = if archived {
         "task.archived"
     } else {
         "task.restored"
     };
-    state.publish(event, json!({ "task": &detail.task }));
+    state.publish(event, json!({ "task": &detail.task, "column": column }));
     Ok(Json(detail))
 }
 

@@ -1717,3 +1717,817 @@ async fn validation_limits_and_error_envelope() {
     assert_eq!(unauthorized.status, StatusCode::UNAUTHORIZED);
     assert_eq!(unauthorized.code(), "unauthorized");
 }
+
+fn task_refs(body: &Value) -> Vec<String> {
+    body.as_array()
+        .expect("task array")
+        .iter()
+        .map(|task| task["reference"].as_str().expect("reference").to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn move_rank_top_bottom_between_and_renumber() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    let first = app
+        .create_task(&cookie, json!({"project_key": "ALP", "title": "First"}))
+        .await;
+    let second = app
+        .create_task(&cookie, json!({"project_key": "ALP", "title": "Second"}))
+        .await;
+    let third = app
+        .create_task(&cookie, json!({"project_key": "ALP", "title": "Third"}))
+        .await;
+    let first_id = first["id"].as_str().expect("id");
+    let second_id = second["id"].as_str().expect("id");
+    let third_id = third["id"].as_str().expect("id");
+
+    let moved = app
+        .cookie_post(
+            "/api/tasks/ALP-3/move",
+            Some(json!({"status": "backlog", "before": "ALP-1"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(moved.status, StatusCode::OK, "{:?}", moved.body);
+    let list = app
+        .get("/api/tasks?status=backlog", Some(&cookie), None)
+        .await;
+    assert_eq!(task_refs(&list.body), ["ALP-3", "ALP-1", "ALP-2"]);
+    assert!(activity_kinds(&moved.body).contains(&"moved".to_owned()));
+
+    app.cookie_post(
+        "/api/tasks/ALP-3/move",
+        Some(json!({"status": "backlog"})),
+        &cookie,
+    )
+    .await;
+    let list = app
+        .get("/api/tasks?status=backlog", Some(&cookie), None)
+        .await;
+    assert_eq!(task_refs(&list.body), ["ALP-1", "ALP-2", "ALP-3"]);
+
+    app.cookie_post(
+        "/api/tasks/ALP-3/move",
+        Some(json!({"status": "backlog", "after": "ALP-1", "before": "ALP-2"})),
+        &cookie,
+    )
+    .await;
+    let list = app
+        .get("/api/tasks?status=backlog", Some(&cookie), None)
+        .await;
+    assert_eq!(task_refs(&list.body), ["ALP-1", "ALP-3", "ALP-2"]);
+
+    let reversed = app
+        .cookie_post(
+            "/api/tasks/ALP-3/move",
+            Some(json!({"status": "backlog", "after": "ALP-2", "before": "ALP-1"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(reversed.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reversed.code(), "validation");
+
+    let non_adjacent = app
+        .cookie_post(
+            "/api/tasks/ALP-3/move",
+            Some(json!({"status": "backlog", "after": "ALP-1", "before": "ALP-2"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(non_adjacent.status, StatusCode::OK);
+
+    let cross = app
+        .cookie_post(
+            "/api/tasks/ALP-3/move",
+            Some(json!({"status": "todo"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(cross.status, StatusCode::OK);
+    assert_eq!(cross.body["status"], "todo");
+
+    let done = app
+        .cookie_post(
+            "/api/tasks/ALP-3/move",
+            Some(json!({"status": "done"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(done.status, StatusCode::OK);
+    assert!(done.body["done_at"].is_number());
+    let reopened = app
+        .cookie_post(
+            "/api/tasks/ALP-3/move",
+            Some(json!({"status": "todo"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(reopened.status, StatusCode::OK);
+    assert!(reopened.body["done_at"].is_null());
+
+    // Seed a gap below 2 * MIN_GAP and insert a fourth card between A and B.
+    let fourth = app
+        .create_task(
+            &cookie,
+            json!({"project_key": "ALP", "title": "Fourth", "status": "todo"}),
+        )
+        .await;
+    let fourth_ref = fourth["reference"].as_str().expect("reference");
+    let (first_seed, second_seed) = (first_id.to_owned(), second_id.to_owned());
+    app.state
+        .db
+        .call(move |connection| {
+            connection.execute("UPDATE tasks SET rank = 1.0 WHERE id = ?1", [first_seed])?;
+            connection.execute(
+                "UPDATE tasks SET rank = ?1 WHERE id = ?2",
+                rusqlite::params![1.0_f64 + 1e-9, second_seed],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("seed tight ranks");
+    let renumbered = app
+        .cookie_post(
+            &format!("/api/tasks/{fourth_ref}/move"),
+            Some(json!({"status": "backlog", "after": "ALP-1", "before": "ALP-2"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(renumbered.status, StatusCode::OK, "{:?}", renumbered.body);
+    let list = app
+        .get("/api/tasks?status=backlog", Some(&cookie), None)
+        .await;
+    assert_eq!(task_refs(&list.body), ["ALP-1", fourth_ref, "ALP-2"]);
+    let ranks: Vec<f64> = list
+        .body
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|task| task["rank"].as_f64().expect("rank"))
+        .collect();
+    assert_eq!(ranks, [1.0, 2.0, 3.0]);
+    let _ = third_id;
+}
+
+#[tokio::test]
+async fn blocker_round_trip_restore_and_explicit_status() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Blocked", "status": "todo"}),
+    )
+    .await;
+
+    let blocked = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"status": "blocker"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(blocked.status, StatusCode::OK, "{:?}", blocked.body);
+    assert_eq!(blocked.body["status"], "blocker");
+    assert_eq!(blocked.body["blocked_from"], "todo");
+    assert!(activity_kinds(&blocked.body).contains(&"blocked".to_owned()));
+
+    let reordered = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"status": "blocker"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(reordered.status, StatusCode::OK);
+    assert_eq!(reordered.body["blocked_from"], "todo");
+
+    let restored = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"restore": true})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(restored.status, StatusCode::OK);
+    assert_eq!(restored.body["status"], "todo");
+    assert!(restored.body["blocked_from"].is_null());
+    assert!(activity_kinds(&restored.body).contains(&"unblocked".to_owned()));
+
+    app.cookie_post(
+        "/api/tasks/ALP-1/move",
+        Some(json!({"status": "blocker"})),
+        &cookie,
+    )
+    .await;
+    let explicit = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"status": "in_review", "restore": true})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(explicit.status, StatusCode::OK);
+    assert_eq!(explicit.body["status"], "in_review");
+    assert!(explicit.body["blocked_from"].is_null());
+
+    app.cookie_post(
+        "/api/tasks/ALP-1/move",
+        Some(json!({"status": "blocker"})),
+        &cookie,
+    )
+    .await;
+    let cleared = app
+        .cookie_post("/api/tasks/ALP-1/move", Some(json!({})), &cookie)
+        .await;
+    assert_eq!(cleared.status, StatusCode::OK);
+    assert_eq!(cleared.body["status"], "blocker");
+    assert!(cleared.body["blocked_from"].is_null());
+    assert!(cleared.body["blocked_reason"].is_null());
+    assert!(activity_kinds(&cleared.body).contains(&"unblocked".to_owned()));
+
+    let invalid = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"restore": true})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid.code(), "validation");
+}
+
+#[tokio::test]
+async fn claim_release_conflicts_and_agent_scope() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    let agent = app.create_token(&cookie, "agent", "agent").await;
+    let agent = agent["token"].as_str().expect("token");
+    let other = app.create_token(&cookie, "other", "agent").await;
+    let other = other["token"].as_str().expect("token");
+
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Claimable", "status": "todo"}),
+    )
+    .await;
+    let claimed = app
+        .request(
+            Method::POST,
+            "/api/tasks/ALP-1/claim",
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{:?}", claimed.body);
+    assert_eq!(claimed.body["status"], "in_progress");
+    assert_eq!(claimed.body["claimed_by"], "agent");
+    assert!(activity_kinds(&claimed.body).contains(&"claimed".to_owned()));
+
+    let again = app
+        .request(
+            Method::POST,
+            "/api/tasks/ALP-1/claim",
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+    assert_eq!(again.code(), "already_claimed");
+
+    let released = app
+        .request(
+            Method::POST,
+            "/api/tasks/ALP-1/release",
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(released.status, StatusCode::OK, "{:?}", released.body);
+    assert!(released.body["claimed_by"].is_null());
+    assert_eq!(released.body["status"], "in_progress");
+    assert!(activity_kinds(&released.body).contains(&"released".to_owned()));
+
+    let unclaimed = app
+        .request(
+            Method::POST,
+            "/api/tasks/ALP-1/release",
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(unclaimed.status, StatusCode::CONFLICT);
+    assert_eq!(unclaimed.code(), "not_claimed");
+
+    app.cookie_post(
+        "/api/tasks/ALP-1/move",
+        Some(json!({"status": "todo"})),
+        &cookie,
+    )
+    .await;
+    let reclaimed = app
+        .request(
+            Method::POST,
+            "/api/tasks/ALP-1/claim",
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(reclaimed.status, StatusCode::OK, "{:?}", reclaimed.body);
+    let other_release = app
+        .request(
+            Method::POST,
+            "/api/tasks/ALP-1/release",
+            None,
+            None,
+            Some(other),
+            None,
+        )
+        .await;
+    assert_eq!(other_release.status, StatusCode::FORBIDDEN);
+    assert_eq!(other_release.code(), "forbidden");
+    let human_release = app
+        .cookie_post("/api/tasks/ALP-1/release", None, &cookie)
+        .await;
+    assert_eq!(human_release.status, StatusCode::OK);
+
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Review", "status": "in_review"}),
+    )
+    .await;
+    let wrong_status = app
+        .request(
+            Method::POST,
+            "/api/tasks/ALP-2/claim",
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(wrong_status.status, StatusCode::CONFLICT);
+    assert_eq!(wrong_status.code(), "not_claimable");
+
+    // A dependency that is not done blocks the claim.
+    let dependency = app
+        .create_task(
+            &cookie,
+            json!({"project_key": "ALP", "title": "Dependency", "status": "todo"}),
+        )
+        .await;
+    let dependency_id = dependency["id"].as_str().expect("id").to_owned();
+    let blocked = app
+        .create_task(
+            &cookie,
+            json!({"project_key": "ALP", "title": "Blocked", "status": "todo"}),
+        )
+        .await;
+    let blocked_id = blocked["id"].as_str().expect("id").to_owned();
+    let blocked_ref = blocked["reference"].as_str().expect("reference").to_owned();
+    let blocked_for_insert = blocked_id.clone();
+    app.state
+        .db
+        .call(move |connection| {
+            connection.execute(
+                "INSERT INTO dependencies (task_id, blocked_by) VALUES (?1, ?2)",
+                [blocked_for_insert, dependency_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("insert dependency");
+    let unmet = app
+        .request(
+            Method::POST,
+            &format!("/api/tasks/{blocked_ref}/claim"),
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(unmet.status, StatusCode::CONFLICT);
+    assert_eq!(unmet.code(), "dependency_unmet");
+    let dependency_ref = dependency["reference"].as_str().expect("reference");
+    app.cookie_post(
+        &format!("/api/tasks/{dependency_ref}/move"),
+        Some(json!({"status": "done"})),
+        &cookie,
+    )
+    .await;
+    let now_claimable = app
+        .request(
+            Method::POST,
+            &format!("/api/tasks/{blocked_ref}/claim"),
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(
+        now_claimable.status,
+        StatusCode::OK,
+        "{:?}",
+        now_claimable.body
+    );
+
+    // Concurrent claims leave exactly one winner.
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Race", "status": "todo"}),
+    )
+    .await;
+    let race_ref = "ALP-5";
+    let race_uri = format!("/api/tasks/{race_ref}/claim");
+    let (a, b, c, d) = tokio::join!(
+        app.request(Method::POST, &race_uri, None, None, Some(agent), None),
+        app.request(Method::POST, &race_uri, None, None, Some(agent), None),
+        app.request(Method::POST, &race_uri, None, None, Some(other), None),
+        app.request(Method::POST, &race_uri, None, None, Some(agent), None)
+    );
+    let responses = [a, b, c, d];
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|response| response.status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert!(responses
+        .iter()
+        .filter(|response| response.status == StatusCode::CONFLICT)
+        .all(|response| response.code() == "already_claimed"));
+
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Human claim", "status": "todo"}),
+    )
+    .await;
+    let human_claim = app
+        .cookie_post("/api/tasks/ALP-6/claim", None, &cookie)
+        .await;
+    assert_eq!(human_claim.status, StatusCode::OK);
+    assert_eq!(human_claim.body["claimed_by"], "ui");
+}
+
+#[tokio::test]
+async fn agent_next_orders_and_claims() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    app.create_project(&cookie, "BET").await;
+    let agent = app.create_token(&cookie, "agent", "agent").await;
+    let agent = agent["token"].as_str().expect("token");
+
+    let high_late = app
+        .create_task(
+            &cookie,
+            json!({"project_key": "ALP", "title": "High late", "status": "backlog", "priority": "high", "due_date": "2026-01-02"}),
+        )
+        .await;
+    let high_early = app
+        .create_task(
+            &cookie,
+            json!({"project_key": "ALP", "title": "High early", "status": "backlog", "priority": "high", "due_date": "2026-01-01"}),
+        )
+        .await;
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Normal none", "status": "backlog"}),
+    )
+    .await;
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Normal dated", "status": "todo", "due_date": "2025-12-31"}),
+    )
+    .await;
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Low", "status": "backlog", "priority": "low", "due_date": "2024-01-01"}),
+    )
+    .await;
+    app.create_task(
+        &cookie,
+        json!({"project_key": "BET", "title": "Other project", "status": "backlog", "priority": "high", "due_date": "2026-01-01"}),
+    )
+    .await;
+
+    let next = app
+        .request(
+            Method::GET,
+            "/api/agent/next?project=ALP",
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(next.status, StatusCode::OK, "{:?}", next.body);
+    assert_eq!(next.body["reference"], high_early["reference"]);
+    assert!(next.body["checklist"].is_array());
+    assert!(next.body["dependencies"]["blocked_by"].is_array());
+
+    let claimed = app
+        .request(
+            Method::GET,
+            "/api/agent/next?project=ALP&claim=1",
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{:?}", claimed.body);
+    assert_eq!(claimed.body["reference"], high_early["reference"]);
+    assert_eq!(claimed.body["status"], "in_progress");
+    assert_eq!(claimed.body["claimed_by"], "agent");
+
+    let next = app
+        .request(
+            Method::GET,
+            "/api/agent/next?project=ALP",
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(next.body["reference"], high_late["reference"]);
+
+    let global = app
+        .request(
+            Method::GET,
+            "/api/agent/next",
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(global.body["reference"], "BET-1");
+
+    for _ in 0..4 {
+        let claimed = app
+            .request(
+                Method::GET,
+                "/api/agent/next?project=ALP&claim=1",
+                None,
+                None,
+                Some(agent),
+                None,
+            )
+            .await;
+        assert_eq!(claimed.status, StatusCode::OK, "{:?}", claimed.body);
+    }
+    let empty = app
+        .request(
+            Method::GET,
+            "/api/agent/next?project=ALP&claim=1",
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(empty.status, StatusCode::NO_CONTENT);
+
+    let unknown = app
+        .request(
+            Method::GET,
+            "/api/agent/next?project=NOPE",
+            None,
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn agent_move_scope_is_limited_to_working_columns() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    let agent = app.create_token(&cookie, "agent", "agent").await;
+    let agent = agent["token"].as_str().expect("token");
+
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Working", "status": "todo"}),
+    )
+    .await;
+    let move_to = |status: &'static str| {
+        let app = &app;
+        async move {
+            app.request(
+                Method::POST,
+                "/api/tasks/ALP-1/move",
+                Some(json!({"status": status})),
+                None,
+                Some(agent),
+                None,
+            )
+            .await
+        }
+    };
+    assert_eq!(move_to("in_progress").await.status, StatusCode::OK);
+    assert_eq!(move_to("in_review").await.status, StatusCode::OK);
+    assert_eq!(move_to("blocker").await.status, StatusCode::OK);
+    let restored = app
+        .request(
+            Method::POST,
+            "/api/tasks/ALP-1/move",
+            Some(json!({"restore": true})),
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(restored.status, StatusCode::OK);
+    assert_eq!(restored.body["status"], "in_review");
+
+    for status in ["backlog", "done"] {
+        let denied = move_to(status).await;
+        assert_eq!(denied.status, StatusCode::FORBIDDEN, "{status}");
+        assert_eq!(denied.code(), "forbidden");
+    }
+
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Backlog source", "status": "backlog"}),
+    )
+    .await;
+    let from_backlog = app
+        .request(
+            Method::POST,
+            "/api/tasks/ALP-2/move",
+            Some(json!({"status": "todo"})),
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(from_backlog.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn next_claim_requires_csrf_for_cookie_requests() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Next", "status": "backlog"}),
+    )
+    .await;
+
+    let denied = app
+        .request(
+            Method::GET,
+            "/api/agent/next?claim=1",
+            None,
+            Some(&cookie),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    assert_eq!(denied.code(), "csrf");
+
+    let allowed = app
+        .request(
+            Method::GET,
+            "/api/agent/next?claim=1",
+            None,
+            Some(&cookie),
+            None,
+            Some(ORIGIN),
+        )
+        .await;
+    assert_eq!(allowed.status, StatusCode::OK, "{:?}", allowed.body);
+    assert_eq!(allowed.body["claimed_by"], "ui");
+}
+
+#[tokio::test]
+async fn ranks_survive_archive_move_and_restore() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    for title in ["First", "Second", "Third"] {
+        app.create_task(&cookie, json!({"project_key": "ALP", "title": title}))
+            .await;
+    }
+
+    app.cookie_post("/api/tasks/ALP-1/archive", None, &cookie)
+        .await;
+    let moved = app
+        .cookie_post(
+            "/api/tasks/ALP-3/move",
+            Some(json!({"status": "backlog", "before": "ALP-2"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(moved.status, StatusCode::OK, "{:?}", moved.body);
+    app.cookie_post("/api/tasks/ALP-1/restore", None, &cookie)
+        .await;
+
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Fourth", "status": "backlog"}),
+    )
+    .await;
+    let between = app
+        .cookie_post(
+            "/api/tasks/ALP-4/move",
+            Some(json!({"status": "backlog", "after": "ALP-1", "before": "ALP-3"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(between.status, StatusCode::OK, "{:?}", between.body);
+    let list = app
+        .get("/api/tasks?status=backlog", Some(&cookie), None)
+        .await;
+    assert_eq!(task_refs(&list.body), ["ALP-1", "ALP-4", "ALP-3", "ALP-2"]);
+}
+
+#[tokio::test]
+async fn token_named_ui_is_rejected() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    for name in ["ui", "UI", " Ui "] {
+        let response = app
+            .cookie_post(
+                "/api/tokens",
+                Some(json!({"name": name, "scope": "agent"})),
+                &cookie,
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{name}");
+        assert_eq!(response.code(), "validation");
+    }
+}
+
+#[tokio::test]
+async fn hidden_archived_card_does_not_block_visible_neighbours() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    for title in ["First", "Hidden", "Third"] {
+        app.create_task(&cookie, json!({"project_key": "ALP", "title": title}))
+            .await;
+    }
+    app.cookie_post("/api/tasks/ALP-2/archive", None, &cookie)
+        .await;
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Fourth", "status": "backlog"}),
+    )
+    .await;
+
+    let moved = app
+        .cookie_post(
+            "/api/tasks/ALP-4/move",
+            Some(json!({"status": "backlog", "after": "ALP-1", "before": "ALP-3"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(moved.status, StatusCode::OK, "{:?}", moved.body);
+    let list = app
+        .get(
+            "/api/tasks?status=backlog&state=active",
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(task_refs(&list.body), ["ALP-1", "ALP-4", "ALP-3"]);
+
+    let restored = app
+        .cookie_post("/api/tasks/ALP-2/restore", None, &cookie)
+        .await;
+    assert_eq!(restored.status, StatusCode::OK);
+    let list = app
+        .get(
+            "/api/tasks?status=backlog&state=active",
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(task_refs(&list.body), ["ALP-1", "ALP-2", "ALP-4", "ALP-3"]);
+}

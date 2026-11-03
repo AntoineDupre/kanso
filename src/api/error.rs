@@ -57,6 +57,12 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, "conflict", message)
     }
 
+    /// A conflict with a specific machine-readable code (`already_claimed`,
+    /// `dependency_unmet`, `not_claimable`, …).
+    pub fn conflict_code(code: &'static str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, code, message)
+    }
+
     pub fn csrf() -> Self {
         Self::new(
             StatusCode::FORBIDDEN,
