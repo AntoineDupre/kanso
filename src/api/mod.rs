@@ -25,6 +25,7 @@ mod board;
 mod checklist;
 mod comments;
 mod dependencies;
+mod dispatch;
 mod error;
 mod events;
 mod inbox;
@@ -33,7 +34,7 @@ mod labels;
 pub(crate) mod model;
 mod projects;
 mod session;
-mod tasks;
+pub(crate) mod tasks;
 mod tokens;
 
 pub use error::ApiError;
@@ -339,6 +340,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/tasks/{reference}/claim", post(tasks::claim))
         .route("/api/tasks/{reference}/release", post(tasks::release))
         .route("/api/tasks/{reference}/session", post(tasks::link_session))
+        .route("/api/tasks/{reference}/dispatch", post(dispatch::dispatch))
         .route(
             "/api/tasks/{reference}/dependencies",
             post(dependencies::set),

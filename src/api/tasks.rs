@@ -200,7 +200,7 @@ pub fn validate_due_date(raw: &str) -> Result<String, ApiError> {
     Ok(raw.to_owned())
 }
 
-pub(super) fn task_by_ref(
+pub(crate) fn task_by_ref(
     connection: &rusqlite::Connection,
     reference: &str,
 ) -> crate::error::Result<Option<Task>> {

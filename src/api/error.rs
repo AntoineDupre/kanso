@@ -83,6 +83,16 @@ impl ApiError {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
     }
 
+    /// A dependency that is not configured or cannot be reached.
+    pub fn service_unavailable(code: &'static str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, code, message)
+    }
+
+    /// The upstream service rejected the request; surface its message.
+    pub fn bad_gateway(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_GATEWAY, "openchamber_error", message)
+    }
+
     /// Ask the response to expire the session cookie (expired/tampered/revoked).
     pub fn clear_cookie(mut self, cookie: impl Into<String>) -> Self {
         self.clear_cookie = Some(cookie.into());

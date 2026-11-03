@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -32,6 +33,9 @@ pub struct AppState {
     pub events: Arc<EventBus>,
     /// Present only when both OpenChamber environment variables are set.
     pub openchamber: Option<Arc<crate::adapter::openchamber::OpenChamber>>,
+    /// Task ids with an upstream dispatch in flight, so two clicks cannot
+    /// create two sessions for the same card.
+    dispatch_in_flight: Arc<Mutex<HashSet<String>>>,
     health: Arc<Mutex<Option<HealthCache>>>,
     health_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -64,6 +68,7 @@ impl AppState {
             login_limiter: Arc::new(crate::auth::LoginLimiter::default()),
             events: Arc::new(EventBus::new(heartbeat)),
             openchamber: None,
+            dispatch_in_flight: Arc::new(Mutex::new(HashSet::new())),
             health: Arc::new(Mutex::new(None)),
             health_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -77,6 +82,22 @@ impl AppState {
     ) -> Self {
         self.openchamber = Some(Arc::new(openchamber));
         self
+    }
+
+    /// Claim the dispatch slot for one card. The HTTP call can take minutes,
+    /// so this is an in-memory reservation rather than a database lock.
+    pub(crate) fn reserve_dispatch(&self, task_id: &str) -> bool {
+        self.dispatch_in_flight
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(task_id.to_owned())
+    }
+
+    pub(crate) fn release_dispatch(&self, task_id: &str) {
+        self.dispatch_in_flight
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(task_id);
     }
 
     /// Publish an event after a transaction has committed.

@@ -71,7 +71,18 @@ async fn serve(port: Option<u16>, data_dir: Option<PathBuf>) -> Result<(), CliEr
         "starting kanso"
     );
 
-    let app = server::router(server::AppState::new(database, web_dir, auth));
+    let mut state = server::AppState::new(database, web_dir, auth);
+    state.openchamber = config.openchamber.as_ref().map(|settings| {
+        std::sync::Arc::new(crate::adapter::openchamber::OpenChamber::new(
+            settings.url(),
+            settings.token(),
+        ))
+    });
+    if state.openchamber.is_some() {
+        crate::adapter::poller::spawn(state.clone());
+        tracing::info!("OpenChamber integration enabled; session polling started");
+    }
+    let app = server::router(state);
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
         .map_err(|error| startup(format!("failed to bind {}: {error}", config.bind)))?;
