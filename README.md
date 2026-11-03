@@ -40,6 +40,65 @@ curl http://127.0.0.1:8087/api/health
 Logs go to stdout without ANSI colours, which is journald-friendly. SIGINT and
 SIGTERM trigger a graceful shutdown with a 10-second drain deadline.
 
+## CLI
+
+`kanso` is both the server and the client. Write a client config once:
+
+```sh
+kanso config init --url https://kanso.example --token kanso_…
+```
+
+`config init` validates the token with `GET /api/me`, prints the identity and
+writes `~/.config/kanso/config.toml` atomically with mode 0600. It refuses to
+replace an existing file without `--force`. `KANSO_URL` and `KANSO_TOKEN`
+override the file per value; `KANSO_CONFIG` overrides its path.
+
+```sh
+kanso project list | add --key ALP --name Alpha | show ALP | edit ALP --name …
+kanso task list [--project ALP] [--status todo] [--label bug] [--mine]
+kanso task show ALP-42
+kanso task add "Title" --project ALP [--description …] [--status todo] [--priority high]
+kanso task edit ALP-42 [--title …] [--description …] [--due 2026-12-01]
+kanso next [--project ALP] [--claim]
+kanso claim ALP-42
+kanso release ALP-42
+kanso move ALP-42 in_review | blocker --reason "…" | restore
+kanso comment ALP-42 "text"             # "-" reads stdin
+kanso check ALP-42 --add "item" | --done 2 | --list
+kanso depend ALP-42 on ALP-40
+kanso propose "Idea" --project ALP [--description …]
+kanso inbox
+kanso session link ALP-42 ses_… --directory /path/to/worktree
+kanso token create --name build --scope agent   # prints the token once
+kanso token list | revoke build
+kanso skill [--print] [--install [--dir ~/.config/opencode/skills]]
+kanso backup [--out DIR]
+```
+
+Output is aligned plain text with no colour or ANSI escapes. For commands that
+talk to the API, `--json` prints the API's own JSON unchanged. Runtime errors go
+to stderr as `kanso: <code>: <message>`; clap prints its own `error: …` usage
+text. Exit codes are `0` success, `1` usage or start-up, `2` API/network/local
+I/O error and `3` conflict (already claimed, dependency unmet, not active, not
+claimable, not claimed, rate limited).
+
+`next`, `claim`, `comment`, `move`, `propose` and `check` accept
+`--agent <name>`. It sends `X-Kanso-Agent`, which overrides the token name in
+comments, activity and `created_by` (not `claimed_by` or claim ownership). The header is honoured only for
+agent-scope tokens; a human token ignores it, and an empty, over-long, reserved
+(`ui`) or control-character name is a validation error.
+
+`kanso skill --print` writes the embedded `skills/kanso/SKILL.md`; `kanso skill
+--install` writes `<dir>/kanso/SKILL.md` (default
+`~/.config/opencode/skills`), creating parents and reporting whether it
+installed, updated or found the file already up to date.
+
+`kanso backup` asks the server to run `VACUUM INTO` under
+`<data_dir>/backups/` and prints the server-side path. `--out DIR` is resolved
+by the server under the data directory; paths that escape it are rejected. There
+is no download endpoint in this milestone, so a host directory cannot be
+targeted directly.
+
 ## Checks
 
 ```sh
@@ -111,9 +170,10 @@ case-insensitively.
 | `POST` | `/api/tasks` | `{project_id\|project_key,title,description?,status?,priority?,due_date?,labels?}`; an agent token creates a proposal instead |
 | `GET` | `/api/tasks/:ref` | `ALP-42` (case-insensitive) or UUID; includes labels, checklist, comments, activity and dependencies |
 | `PATCH` | `/api/tasks/:ref` | `title`, `description`, `priority`, `due_date`, `labels`; other fields are rejected |
-| `POST` | `/api/tasks/:ref/move` | `{status?,before?,after?,restore?}` |
+| `POST` | `/api/tasks/:ref/move` | `{status?,before?,after?,restore?,reason?}`; `reason` (max 500 characters) is stored in `blocked_reason` when entering `blocker` |
 | `POST` | `/api/tasks/:ref/claim` | Human or agent; sets `claimed_by`, status → `in_progress` |
 | `POST` | `/api/tasks/:ref/release` | Clears the claim, keeps the column |
+| `POST` | `/api/tasks/:ref/session` | Human only; `{session_id,directory,status?}` with status `running` by default (also `idle`, `waiting`, `failed`, `offline`) |
 | `POST` | `/api/tasks/:ref/dependencies` | `{blocked_by:[ref,…]}` replaces the set; `[]` clears it (human only) |
 | `POST` | `/api/tasks/:ref/archive` | Human only in M2 |
 | `POST` | `/api/tasks/:ref/restore` | Human only in M2 |
@@ -130,8 +190,15 @@ one; both must be adjacent among the visible active cards). When the midpoint
 gap falls below `1e-6`, the target column is renumbered `1..n` in the same
 transaction. Entering `blocker` stores `blocked_from`; `restore:true` returns to
 that column, an explicit `status` wins over `restore`, and a move with neither
-clears `blocked_from`/`blocked_reason` while keeping the card in `blocker`.
-Entering `done` sets `done_at`; leaving it clears the timestamp.
+clears `blocked_from`/`blocked_reason` while keeping the card in `blocker` —
+unless it sends `reason`, which updates `blocked_reason` in place and keeps
+`blocked_from`. Entering `done` sets `done_at`; leaving it clears the timestamp.
+
+An agent-scope bearer token may send `X-Kanso-Agent: <name>` to override its
+token name in comments, activity and `created_by`. Claim ownership (`claimed_by`,
+release checks) stays the token principal. The header is ignored
+for human tokens and rejected with `400 validation` when the name is empty,
+longer than 64 characters, contains a control character or is `ui`.
 
 `claim` requires an active card in `backlog`/`todo`, no existing claim, and every
 `blocked_by` card in `done`; failures are `409 already_claimed`,
@@ -199,12 +266,13 @@ the full reordered `checklist`), and `checklist.deleted` carries `task_id` and
 | --- | --- | --- |
 | `GET`/`POST` | `/api/labels` | `{name,color}`; names unique case-insensitively, colour `#rrggbb` |
 | `PATCH`/`DELETE` | `/api/labels/:id` | Deleting detaches the label from cards |
-| `POST` | `/api/tasks/:ref/comment` | `{body}`; author is `ui` or the token name |
+| `POST` | `/api/tasks/:ref/comment` | `{body}`; author is `ui`, the token name, or `X-Kanso-Agent` for an agent token |
 | `POST` | `/api/tasks/:ref/checklist` | `{text}` |
 | `PATCH` | `/api/tasks/:ref/checklist/:item` | `{text?,done?,before?,after?}`; `after` names the preceding item and `before` the following one |
 | `DELETE` | `/api/tasks/:ref/checklist/:item` | Human only in M2 |
 | `GET`/`POST` | `/api/tokens` | `{name,scope}`; the `kanso_` token is returned once only; `ui` is reserved |
 | `DELETE` | `/api/tokens/:id` | Revoke; repeating it is idempotent |
+| `POST` | `/api/backup` | Human only; `VACUUM INTO` under `<data_dir>/backups/`; body `{dir?}` resolves under the data directory |
 
 Agent-scoped tokens may read projects, tasks, labels, boards, the inbox and
 `/api/agent/next`; claim and release their own claims; move cards between
@@ -217,7 +285,8 @@ delete checklist items, or manage projects/labels/tokens.
 Every task mutation writes an `activity` row (`created`, `proposed`, `updated`,
 `moved`, `blocked`, `unblocked`, `claimed`, `released`, `accepted`, `rejected`,
 `dependencies_changed`, `commented`, `checklist_added`, `checklist_updated`,
-`checklist_removed`, `label_added`, `label_removed`, `archived`, `restored`)
+`checklist_removed`, `label_added`, `label_removed`, `session_linked`,
+`archived`, `restored`)
 with a small JSON `data` payload.
 
 The data directory also holds `session.key`, a random 0600 HMAC key used to sign
