@@ -9,6 +9,7 @@ pub mod events;
 pub mod ids;
 pub mod rank;
 pub mod server;
+pub mod time;
 pub mod web;
 
 #[cfg(test)]

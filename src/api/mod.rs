@@ -20,6 +20,7 @@ use crate::ids;
 use crate::server::AppState;
 
 mod agent;
+mod backup;
 mod board;
 mod checklist;
 mod comments;
@@ -75,7 +76,8 @@ impl FromRequestParts<AppState> for Auth {
             if !scheme.eq_ignore_ascii_case("bearer") {
                 return Err(ApiError::unauthorized("unsupported authorization scheme"));
             }
-            let identity = token_identity(state, token.trim()).await?;
+            let mut identity = token_identity(state, token.trim()).await?;
+            apply_agent_header(&mut identity, &parts.headers)?;
             return Ok(Self(identity));
         }
 
@@ -137,10 +139,56 @@ impl FromRequestParts<AppState> for Auth {
             kind: IdentityKind::Ui,
             name: "ui".to_owned(),
             scope: Scope::Human,
+            display_name: None,
             session_id: Some(session_id),
             token_id: None,
         }))
     }
+}
+
+/// Header an agent token may use to override its display name.
+///
+/// It is honoured only for agent-scoped bearer tokens. A human token or UI
+/// session ignores it. An agent token sending an empty, over-long, reserved or
+/// control-character name is rejected with `400 validation` rather than having
+/// the header silently dropped, so `--agent` mistakes surface immediately.
+pub const AGENT_HEADER: &str = "x-kanso-agent";
+pub const MAX_AGENT_NAME_CHARS: usize = 64;
+
+fn apply_agent_header(
+    identity: &mut Identity,
+    headers: &header::HeaderMap,
+) -> Result<(), ApiError> {
+    if identity.scope != Scope::Agent {
+        return Ok(());
+    }
+    let Some(value) = headers.get(AGENT_HEADER) else {
+        return Ok(());
+    };
+    let raw = value
+        .to_str()
+        .map_err(|_| ApiError::validation("X-Kanso-Agent must be valid UTF-8"))?;
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(ApiError::validation("X-Kanso-Agent must not be empty"));
+    }
+    if name.chars().count() > MAX_AGENT_NAME_CHARS {
+        return Err(ApiError::validation(format!(
+            "X-Kanso-Agent must be at most {MAX_AGENT_NAME_CHARS} characters"
+        )));
+    }
+    if name.eq_ignore_ascii_case("ui") {
+        return Err(ApiError::validation(
+            "X-Kanso-Agent may not impersonate \"ui\"",
+        ));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(ApiError::validation(
+            "X-Kanso-Agent must not contain control characters",
+        ));
+    }
+    identity.display_name = Some(name.to_owned());
+    Ok(())
 }
 
 async fn token_identity(state: &AppState, token: &str) -> Result<Identity, ApiError> {
@@ -190,6 +238,7 @@ async fn token_identity(state: &AppState, token: &str) -> Result<Identity, ApiEr
             kind: IdentityKind::Token,
             name,
             scope: Scope::parse(&scope).unwrap_or(Scope::Agent),
+            display_name: None,
             session_id: None,
             token_id: Some(id),
         }),
@@ -287,6 +336,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/tasks/{reference}/move", post(tasks::move_task))
         .route("/api/tasks/{reference}/claim", post(tasks::claim))
         .route("/api/tasks/{reference}/release", post(tasks::release))
+        .route("/api/tasks/{reference}/session", post(tasks::link_session))
         .route(
             "/api/tasks/{reference}/dependencies",
             post(dependencies::set),
@@ -310,6 +360,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/tokens", get(tokens::list).post(tokens::create))
         .route("/api/tokens/{id}", axum::routing::delete(tokens::revoke))
+        .route("/api/backup", post(backup::create))
 }
 
 /// Double-option field: absent -> `None`, `null` -> `Some(None)`, value ->
@@ -347,4 +398,47 @@ pub fn validate_color(raw: &str) -> Result<String, ApiError> {
         ));
     }
     Ok(color.to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity(scope: Scope) -> Identity {
+        Identity {
+            kind: IdentityKind::Token,
+            name: "build".to_owned(),
+            scope,
+            display_name: None,
+            session_id: None,
+            token_id: Some("token-id".to_owned()),
+        }
+    }
+
+    fn headers(value: &str) -> header::HeaderMap {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(AGENT_HEADER, value.parse().expect("header value"));
+        headers
+    }
+
+    #[test]
+    fn agent_header_overrides_only_agent_tokens() {
+        let mut agent = identity(Scope::Agent);
+        apply_agent_header(&mut agent, &headers("  reviewer  ")).expect("apply");
+        assert_eq!(agent.actor(), "reviewer");
+        assert_eq!(agent.name, "build");
+
+        let mut human = identity(Scope::Human);
+        apply_agent_header(&mut human, &headers("reviewer")).expect("ignored");
+        assert_eq!(human.actor(), "build");
+    }
+
+    #[test]
+    fn agent_header_rejects_empty_reserved_and_overlong_names() {
+        let mut agent = identity(Scope::Agent);
+        assert!(apply_agent_header(&mut agent, &headers("   ")).is_err());
+        assert!(apply_agent_header(&mut agent, &headers("UI")).is_err());
+        assert!(apply_agent_header(&mut agent, &headers(&"x".repeat(65))).is_err());
+        assert_eq!(agent.name, "build");
+    }
 }

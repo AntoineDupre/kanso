@@ -94,6 +94,7 @@ pub async fn next(
     }
     let project = query.project;
     let actor = auth.0.actor().to_owned();
+    let claimed_by = auth.0.name.clone();
     let now = now_millis();
 
     let outcome = state
@@ -146,7 +147,7 @@ pub async fn next(
 
             if claim {
                 for task in &candidates {
-                    match claim_in_transaction(&transaction, task, &actor, now)? {
+                    match claim_in_transaction(&transaction, task, &claimed_by, &actor, now)? {
                         ClaimOutcome::Claimed => {
                             let task = task_by_ref(&transaction, &task.id)?
                                 .ok_or_else(|| crate::error::Error::msg("claimed task missing"))?;

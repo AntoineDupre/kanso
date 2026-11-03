@@ -79,6 +79,22 @@ pub struct MoveTask {
     before: Option<String>,
     after: Option<String>,
     restore: Option<bool>,
+    /// Free text stored in `blocked_reason` when the move targets `blocker`:
+    /// it is set on entry, updated on an already-blocked card, and cleared by
+    /// an explicit empty value. Leaving `blocker` always clears it.
+    reason: Option<String>,
+}
+
+const MAX_BLOCKED_REASON_CHARS: usize = 500;
+
+fn validate_blocked_reason(raw: &str) -> Result<Option<String>, ApiError> {
+    let reason = raw.trim();
+    if reason.chars().count() > MAX_BLOCKED_REASON_CHARS {
+        return Err(ApiError::validation(
+            "blocked reason must be at most 500 characters",
+        ));
+    }
+    Ok((!reason.is_empty()).then(|| reason.to_owned()))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -482,9 +498,14 @@ pub(super) enum ClaimOutcome {
 
 /// Claim `task` in the caller's transaction: gate on state/status/dependencies,
 /// move it to the end of `in_progress`, and record the activity row.
+///
+/// `claimed_by` is the token principal (ownership); `actor` is only the
+/// attribution written to the activity log, so `X-Kanso-Agent` cannot take over
+/// another token's claim.
 pub(super) fn claim_in_transaction(
     connection: &rusqlite::Connection,
     task: &Task,
+    claimed_by: &str,
     actor: &str,
     now: i64,
 ) -> crate::error::Result<ClaimOutcome> {
@@ -515,7 +536,7 @@ pub(super) fn claim_in_transaction(
     let changed = connection.execute(
         "UPDATE tasks SET claimed_by = ?1, status = 'in_progress', rank = ?2, updated_at = ?3
          WHERE id = ?4 AND claimed_by IS NULL",
-        params![actor, rank, now, task.id],
+        params![claimed_by, rank, now, task.id],
     )?;
     if changed == 0 {
         return Ok(ClaimOutcome::AlreadyClaimed);
@@ -1024,6 +1045,7 @@ enum MoveOutcome {
     MissingNeighbour(String),
     InvalidOrder,
     Forbidden,
+    ReasonOutsideBlocker,
 }
 
 pub async fn move_task(
@@ -1036,6 +1058,11 @@ pub async fn move_task(
     let restore = payload.restore.unwrap_or(false);
     let before = payload.before;
     let after = payload.after;
+    let reason = payload
+        .reason
+        .as_deref()
+        .map(validate_blocked_reason)
+        .transpose()?;
     let agent = !auth.0.is_human();
     let actor = auth.0.actor().to_owned();
     let now = now_millis();
@@ -1080,7 +1107,12 @@ pub async fn move_task(
             let clear_blocker_in_place = current == "blocker"
                 && target == "blocker"
                 && explicit_status.is_none()
-                && !restore;
+                && !restore
+                && reason.is_none();
+
+            if reason.is_some() && target != "blocker" {
+                return Ok(MoveOutcome::ReasonOutsideBlocker);
+            }
 
             let blocked_from = if entering_blocker {
                 Some(current.clone())
@@ -1091,6 +1123,14 @@ pub async fn move_task(
             };
             let blocked_reason = if leaving_blocker || clear_blocker_in_place {
                 None
+            } else if target == "blocker" {
+                match &reason {
+                    // An explicit reason (including an empty one) replaces the
+                    // stored text; entering without a reason clears stale text.
+                    Some(value) => value.clone(),
+                    None if entering_blocker => None,
+                    None => task.blocked_reason.clone(),
+                }
             } else {
                 task.blocked_reason.clone()
             };
@@ -1237,6 +1277,9 @@ pub async fn move_task(
         MoveOutcome::Forbidden => Err(ApiError::forbidden(
             "agents may only move cards between todo, in_progress, in_review and blocker",
         )),
+        MoveOutcome::ReasonOutsideBlocker => Err(ApiError::validation(
+            "reason is only valid when moving to blocker",
+        )),
     }
 }
 
@@ -1254,6 +1297,7 @@ pub async fn claim(
     Path(reference): Path<String>,
 ) -> Result<Json<TaskDetail>, ApiError> {
     let actor = auth.0.actor().to_owned();
+    let claimed_by = auth.0.name.clone();
     let now = now_millis();
     let outcome = state
         .db
@@ -1262,7 +1306,7 @@ pub async fn claim(
             let Some(task) = task_by_ref(&transaction, &reference)? else {
                 return Ok(ClaimResult::NotFound);
             };
-            match claim_in_transaction(&transaction, &task, &actor, now)? {
+            match claim_in_transaction(&transaction, &task, &claimed_by, &actor, now)? {
                 ClaimOutcome::Claimed => {
                     let task = task_by_ref(&transaction, &task.id)?
                         .ok_or_else(|| crate::error::Error::msg("claimed task missing"))?;
@@ -1311,6 +1355,7 @@ pub async fn release(
     Path(reference): Path<String>,
 ) -> Result<Json<TaskDetail>, ApiError> {
     let actor = auth.0.actor().to_owned();
+    let principal = auth.0.name.clone();
     let human = auth.0.is_human();
     let now = now_millis();
     let outcome = state
@@ -1323,7 +1368,7 @@ pub async fn release(
             let Some(claimed_by) = task.claimed_by.clone() else {
                 return Ok(ReleaseResult::NotClaimed);
             };
-            if !human && claimed_by != actor {
+            if !human && claimed_by != principal {
                 return Ok(ReleaseResult::Forbidden);
             }
             transaction.execute(
@@ -1357,6 +1402,107 @@ pub async fn release(
         ReleaseResult::Forbidden => Err(ApiError::forbidden(
             "an agent may only release its own claim",
         )),
+    }
+}
+
+pub const SESSION_STATUSES: [&str; 5] = ["running", "idle", "waiting", "failed", "offline"];
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkSession {
+    session_id: String,
+    directory: String,
+    status: Option<String>,
+}
+
+fn validate_session_status(raw: &str) -> Result<String, ApiError> {
+    let status = raw.trim();
+    if SESSION_STATUSES.contains(&status) {
+        Ok(status.to_owned())
+    } else {
+        Err(ApiError::validation(format!(
+            "session status must be one of {}",
+            SESSION_STATUSES.join(", ")
+        )))
+    }
+}
+
+enum LinkOutcome {
+    Linked(Box<TaskDetail>),
+    NotFound,
+}
+
+/// `POST /api/tasks/:ref/session` — human-only session link for the pull flow.
+pub async fn link_session(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(reference): Path<String>,
+    ApiJson(payload): ApiJson<LinkSession>,
+) -> Result<Json<TaskDetail>, ApiError> {
+    require_human(&auth.0)?;
+    let session_id = payload.session_id.trim();
+    if session_id.is_empty() {
+        return Err(ApiError::validation("session_id must not be empty"));
+    }
+    if session_id.chars().count() > 200 {
+        return Err(ApiError::validation(
+            "session_id must be at most 200 characters",
+        ));
+    }
+    let directory = payload.directory.trim();
+    if directory.is_empty() {
+        return Err(ApiError::validation("directory must not be empty"));
+    }
+    if directory.len() > 4096 {
+        return Err(ApiError::validation("directory must be at most 4096 bytes"));
+    }
+    let status = match payload.status.as_deref() {
+        Some(value) => validate_session_status(value)?,
+        None => "running".to_owned(),
+    };
+    let session_id = session_id.to_owned();
+    let directory = directory.to_owned();
+    let actor = auth.0.actor().to_owned();
+    let now = now_millis();
+
+    let outcome = state
+        .db
+        .call(move |connection| {
+            let transaction = connection.transaction()?;
+            let Some(task) = task_by_ref(&transaction, &reference)? else {
+                return Ok(LinkOutcome::NotFound);
+            };
+            transaction.execute(
+                "UPDATE tasks
+                 SET session_id = ?1, session_directory = ?2, session_status = ?3, updated_at = ?4
+                 WHERE id = ?5",
+                params![session_id, directory, status, now, task.id],
+            )?;
+            insert_activity(
+                &transaction,
+                &task.id,
+                &actor,
+                "session_linked",
+                &json!({
+                    "session_id": session_id,
+                    "directory": directory,
+                    "status": status,
+                }),
+            )?;
+            let task = task_by_ref(&transaction, &task.id)?
+                .ok_or_else(|| crate::error::Error::msg("linked task missing"))?;
+            let detail = task_detail(&transaction, task)?;
+            transaction.commit()?;
+            Ok(LinkOutcome::Linked(Box::new(detail)))
+        })
+        .await?;
+
+    match outcome {
+        LinkOutcome::Linked(detail) => {
+            state.publish("task.updated", json!({ "task": &detail.task }));
+            Ok(Json(*detail))
+        }
+        LinkOutcome::NotFound => Err(ApiError::not_found("task not found")),
     }
 }
 
@@ -1566,6 +1712,29 @@ mod tests {
         for invalid in ["2025-02-29", "2026-13-01", "2026-04-31", "2026-1-01", "x"] {
             assert!(validate_due_date(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn blocked_reasons_are_trimmed_and_bounded() {
+        assert_eq!(
+            validate_blocked_reason("  waiting for review  ").expect("reason"),
+            Some("waiting for review".to_owned())
+        );
+        assert_eq!(validate_blocked_reason("   ").expect("empty"), None);
+        assert!(validate_blocked_reason(&"x".repeat(500)).is_ok());
+        assert!(validate_blocked_reason(&"x".repeat(501)).is_err());
+    }
+
+    #[test]
+    fn session_statuses_are_validated() {
+        for status in SESSION_STATUSES {
+            assert_eq!(validate_session_status(status).expect("status"), status);
+        }
+        assert_eq!(
+            validate_session_status(" running ").expect("trimmed"),
+            "running"
+        );
+        assert!(validate_session_status("busy").is_err());
     }
 
     #[test]

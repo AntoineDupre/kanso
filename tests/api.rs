@@ -114,6 +114,21 @@ impl TestApp {
         bearer: Option<&str>,
         origin: Option<&str>,
     ) -> ApiResponse {
+        self.request_with_headers(method, uri, body, cookie, bearer, origin, &[])
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn request_with_headers(
+        &self,
+        method: Method,
+        uri: &str,
+        body: Option<Value>,
+        cookie: Option<&str>,
+        bearer: Option<&str>,
+        origin: Option<&str>,
+        extra: &[(&str, &str)],
+    ) -> ApiResponse {
         let mut builder = Request::builder()
             .method(method)
             .uri(uri)
@@ -126,6 +141,9 @@ impl TestApp {
         }
         if let Some(origin) = origin {
             builder = builder.header(header::ORIGIN, origin);
+        }
+        for (name, value) in extra {
+            builder = builder.header(*name, *value);
         }
         let body = match body {
             Some(value) => {
@@ -3172,4 +3190,414 @@ async fn move_neighbour_error_uses_the_caller_reference() {
     assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
     let message = unknown.body["error"]["message"].as_str().expect("message");
     assert!(message.contains("ALP-999"), "{message}");
+}
+
+#[tokio::test]
+async fn session_link_is_human_only_and_records_the_activity() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    let task = app
+        .create_task(&cookie, json!({"project_key": "ALP", "title": "Linked"}))
+        .await;
+    let reference = task["reference"].as_str().expect("reference");
+
+    let linked = app
+        .cookie_post(
+            &format!("/api/tasks/{reference}/session"),
+            Some(json!({
+                "session_id": "ses_123",
+                "directory": "/home/mathieu/worktrees/alp-1"
+            })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(linked.status, StatusCode::OK, "{:?}", linked.body);
+    assert_eq!(linked.body["session_id"], "ses_123");
+    assert_eq!(
+        linked.body["session_directory"],
+        "/home/mathieu/worktrees/alp-1"
+    );
+    assert_eq!(linked.body["session_status"], "running");
+    assert!(activity_kinds(&linked.body)
+        .iter()
+        .any(|kind| kind == "session_linked"));
+    let linked_entry = linked.body["activity"]
+        .as_array()
+        .expect("activity")
+        .iter()
+        .find(|entry| entry["kind"] == "session_linked")
+        .expect("session_linked activity");
+    assert_eq!(linked_entry["data"]["session_id"], "ses_123");
+
+    let idle = app
+        .cookie_post(
+            &format!("/api/tasks/{reference}/session"),
+            Some(json!({
+                "session_id": "ses_123",
+                "directory": "/tmp",
+                "status": "idle"
+            })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(idle.status, StatusCode::OK);
+    assert_eq!(idle.body["session_status"], "idle");
+
+    let invalid = app
+        .cookie_post(
+            &format!("/api/tasks/{reference}/session"),
+            Some(json!({"session_id": "ses_1", "directory": "/tmp", "status": "busy"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid.code(), "validation");
+
+    let missing = app
+        .cookie_post(
+            "/api/tasks/ALP-999/session",
+            Some(json!({"session_id": "ses_1", "directory": "/tmp"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+
+    let agent = app.create_token(&cookie, "agent", "agent").await;
+    let agent = agent["token"].as_str().expect("token");
+    let denied = app
+        .request(
+            Method::POST,
+            &format!("/api/tasks/{reference}/session"),
+            Some(json!({"session_id": "ses_2", "directory": "/tmp"})),
+            None,
+            Some(agent),
+            None,
+        )
+        .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn move_stores_and_clears_blocker_reasons() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Blocked", "status": "todo"}),
+    )
+    .await;
+
+    let blocked = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"status": "blocker", "reason": "  waiting on API key  "})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(blocked.status, StatusCode::OK, "{:?}", blocked.body);
+    assert_eq!(blocked.body["blocked_from"], "todo");
+    assert_eq!(blocked.body["blocked_reason"], "waiting on API key");
+
+    let restored = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"restore": true})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(restored.status, StatusCode::OK);
+    assert_eq!(restored.body["status"], "todo");
+    assert!(restored.body["blocked_reason"].is_null());
+    assert!(restored.body["blocked_from"].is_null());
+
+    let outside = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"status": "in_review", "reason": "not blocked"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(outside.status, StatusCode::BAD_REQUEST);
+    assert_eq!(outside.code(), "validation");
+
+    let too_long = "x".repeat(501);
+    let rejected = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"status": "blocker", "reason": too_long})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
+
+    let cleared = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"status": "blocker"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(cleared.status, StatusCode::OK);
+    assert!(cleared.body["blocked_reason"].is_null());
+
+    let update = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"status": "blocker", "reason": "new reason"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(update.status, StatusCode::OK);
+    assert_eq!(update.body["blocked_reason"], "new reason");
+    assert_eq!(update.body["blocked_from"], "todo");
+
+    // No status and a reason updates in place without clearing blocker metadata.
+    let in_place = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"reason": "changed reason"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(in_place.status, StatusCode::OK, "{:?}", in_place.body);
+    assert_eq!(in_place.body["blocked_reason"], "changed reason");
+    assert_eq!(in_place.body["blocked_from"], "todo");
+
+    // An explicit empty reason clears the stored text.
+    let cleared_reason = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"status": "blocker", "reason": "   "})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(cleared_reason.status, StatusCode::OK);
+    assert!(cleared_reason.body["blocked_reason"].is_null());
+    assert_eq!(cleared_reason.body["blocked_from"], "todo");
+}
+
+#[tokio::test]
+async fn agent_header_overrides_attribution_for_agent_tokens_only() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    app.create_task(&cookie, json!({"project_key": "ALP", "title": "Card"}))
+        .await;
+    let agent = app.create_token(&cookie, "build", "agent").await;
+    let agent = agent["token"].as_str().expect("token");
+    let human = app.create_token(&cookie, "human-cli", "human").await;
+    let human = human["token"].as_str().expect("token");
+
+    let commented = app
+        .request_with_headers(
+            Method::POST,
+            "/api/tasks/ALP-1/comment",
+            Some(json!({"body": "from reviewer"})),
+            None,
+            Some(agent),
+            None,
+            &[("X-Kanso-Agent", "reviewer")],
+        )
+        .await;
+    assert_eq!(
+        commented.status,
+        StatusCode::CREATED,
+        "{:?}",
+        commented.body
+    );
+    assert_eq!(commented.body["author"], "reviewer");
+    let detail = app.get("/api/tasks/ALP-1", None, Some(agent)).await;
+    let comment_entry = detail.body["activity"]
+        .as_array()
+        .expect("activity")
+        .iter()
+        .find(|entry| entry["kind"] == "commented")
+        .expect("commented activity");
+    assert_eq!(comment_entry["actor"], "reviewer");
+
+    let proposal = app
+        .request_with_headers(
+            Method::POST,
+            "/api/tasks",
+            Some(json!({"project_key": "ALP", "title": "Idea"})),
+            None,
+            Some(agent),
+            None,
+            &[("X-Kanso-Agent", "planner")],
+        )
+        .await;
+    assert_eq!(proposal.status, StatusCode::CREATED, "{:?}", proposal.body);
+    assert_eq!(proposal.body["created_by"], "planner");
+    assert_eq!(proposal.body["state"], "proposed");
+
+    // A human token ignores the header.
+    let human_comment = app
+        .request_with_headers(
+            Method::POST,
+            "/api/tasks/ALP-1/comment",
+            Some(json!({"body": "human"})),
+            None,
+            Some(human),
+            None,
+            &[("X-Kanso-Agent", "reviewer")],
+        )
+        .await;
+    assert_eq!(human_comment.status, StatusCode::CREATED);
+    assert_eq!(human_comment.body["author"], "human-cli");
+
+    for value in ["", "   ", "ui", &"x".repeat(65)] {
+        let response = app
+            .request_with_headers(
+                Method::GET,
+                "/api/me",
+                None,
+                None,
+                Some(agent),
+                None,
+                &[("X-Kanso-Agent", value)],
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{value:?}");
+        assert_eq!(response.code(), "validation");
+    }
+}
+
+#[tokio::test]
+async fn backup_writes_a_timestamped_copy_under_the_data_directory() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+
+    let backup = app
+        .request(
+            Method::POST,
+            "/api/backup",
+            None,
+            Some(&cookie),
+            None,
+            Some(ORIGIN),
+        )
+        .await;
+    assert_eq!(backup.status, StatusCode::OK, "{:?}", backup.body);
+    let path = backup.body["path"].as_str().expect("path");
+    assert!(path.contains("/backups/kanso-"), "{path}");
+    assert!(path.ends_with(".db"), "{path}");
+    let size = backup.body["size"].as_u64().expect("size");
+    assert!(size > 0);
+    assert!(backup.body["created_at"].as_i64().is_some());
+    assert!(Path::new(path).is_file(), "{path}");
+    assert!(kanso::db::quick_check(Path::new(path)), "{path}");
+
+    let nested = app
+        .cookie_post(
+            "/api/backup",
+            Some(json!({"dir": "nested/backups"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(nested.status, StatusCode::OK, "{:?}", nested.body);
+    let nested_path = nested.body["path"].as_str().expect("path");
+    assert!(nested_path.contains("/nested/backups/"), "{nested_path}");
+    assert!(Path::new(nested_path).is_file());
+
+    let escape = app
+        .cookie_post("/api/backup", Some(json!({"dir": "../escape"})), &cookie)
+        .await;
+    assert_eq!(escape.status, StatusCode::BAD_REQUEST);
+    assert_eq!(escape.code(), "validation");
+
+    let absolute_escape = app
+        .cookie_post("/api/backup", Some(json!({"dir": "/etc"})), &cookie)
+        .await;
+    assert_eq!(absolute_escape.status, StatusCode::BAD_REQUEST);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let outside = TempDir::new();
+        symlink(outside.path(), app._dir.path().join("link")).expect("symlink");
+        let symlink_escape = app
+            .cookie_post("/api/backup", Some(json!({"dir": "link/backups"})), &cookie)
+            .await;
+        assert_eq!(symlink_escape.status, StatusCode::BAD_REQUEST);
+        assert!(!outside.path().join("backups").exists());
+    }
+
+    let agent = app.create_token(&cookie, "agent", "agent").await;
+    let agent = agent["token"].as_str().expect("token");
+    let denied = app
+        .request(Method::POST, "/api/backup", None, None, Some(agent), None)
+        .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn agent_header_changes_attribution_but_not_claim_ownership() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    app.create_task(&cookie, json!({"project_key": "ALP", "title": "Owned"}))
+        .await;
+    let first = app.create_token(&cookie, "agent-one", "agent").await;
+    let first = first["token"].as_str().expect("token");
+    let second = app.create_token(&cookie, "agent-two", "agent").await;
+    let second = second["token"].as_str().expect("token");
+
+    let claimed = app
+        .request_with_headers(
+            Method::POST,
+            "/api/tasks/ALP-1/claim",
+            None,
+            None,
+            Some(first),
+            None,
+            &[("X-Kanso-Agent", "reviewer")],
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{:?}", claimed.body);
+    assert_eq!(claimed.body["claimed_by"], "agent-one");
+    let claim_entry = claimed.body["activity"]
+        .as_array()
+        .expect("activity")
+        .iter()
+        .find(|entry| entry["kind"] == "claimed")
+        .expect("claimed activity");
+    assert_eq!(claim_entry["actor"], "reviewer");
+
+    // A different principal cannot release the claim by spoofing its name.
+    let denied = app
+        .request_with_headers(
+            Method::POST,
+            "/api/tasks/ALP-1/release",
+            None,
+            None,
+            Some(second),
+            None,
+            &[("X-Kanso-Agent", "agent-one")],
+        )
+        .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+
+    let released = app
+        .request_with_headers(
+            Method::POST,
+            "/api/tasks/ALP-1/release",
+            None,
+            None,
+            Some(first),
+            None,
+            &[("X-Kanso-Agent", "reviewer")],
+        )
+        .await;
+    assert_eq!(released.status, StatusCode::OK);
+    assert!(released.body["claimed_by"].is_null());
+    let release_entry = released.body["activity"]
+        .as_array()
+        .expect("activity")
+        .iter()
+        .find(|entry| entry["kind"] == "released")
+        .expect("released activity");
+    assert_eq!(release_entry["actor"], "reviewer");
 }

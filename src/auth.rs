@@ -75,8 +75,12 @@ impl IdentityKind {
 #[derive(Clone, Debug)]
 pub struct Identity {
     pub kind: IdentityKind,
+    /// The token or session name. This is the authorization principal and must
+    /// not be changed by request headers.
     pub name: String,
     pub scope: Scope,
+    /// Optional display name from `X-Kanso-Agent`, used only for attribution.
+    pub display_name: Option<String>,
     /// Set for cookie authentication so logout can delete the row.
     pub session_id: Option<String>,
     /// Set for bearer authentication so a live SSE stream can revalidate the
@@ -90,8 +94,11 @@ impl Identity {
     }
 
     /// Attribution stored in `created_by`, `comments.author` and `activity.actor`.
+    ///
+    /// This is deliberately separate from `name`, which stays the token
+    /// principal for ownership checks such as releasing a claim.
     pub fn actor(&self) -> &str {
-        &self.name
+        self.display_name.as_deref().unwrap_or(&self.name)
     }
 }
 
