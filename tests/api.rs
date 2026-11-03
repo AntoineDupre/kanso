@@ -3068,3 +3068,47 @@ async fn move_rejects_non_adjacent_neighbours() {
         .await;
     assert_eq!(task_refs(&list.body), ["ALP-1", "ALP-4", "ALP-2", "ALP-3"]);
 }
+
+#[tokio::test]
+async fn move_neighbour_error_uses_the_caller_reference() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    app.create_task(
+        &cookie,
+        json!({"project_key": "ALP", "title": "Backlog card"}),
+    )
+    .await;
+    let other = app
+        .create_task(
+            &cookie,
+            json!({"project_key": "ALP", "title": "Todo card", "status": "todo"}),
+        )
+        .await;
+    let other_id = other["id"].as_str().expect("id");
+
+    for body in [
+        json!({"status": "backlog", "before": "ALP-2"}),
+        json!({"status": "backlog", "after": "ALP-2"}),
+    ] {
+        let response = app
+            .cookie_post("/api/tasks/ALP-1/move", Some(body), &cookie)
+            .await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert_eq!(response.code(), "validation");
+        let message = response.body["error"]["message"].as_str().expect("message");
+        assert!(message.contains("ALP-2"), "{message}");
+        assert!(!message.contains(other_id), "{message}");
+    }
+
+    let unknown = app
+        .cookie_post(
+            "/api/tasks/ALP-1/move",
+            Some(json!({"status": "backlog", "before": "ALP-999"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+    let message = unknown.body["error"]["message"].as_str().expect("message");
+    assert!(message.contains("ALP-999"), "{message}");
+}

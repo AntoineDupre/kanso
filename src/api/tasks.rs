@@ -1122,7 +1122,18 @@ pub async fn move_task(
             let (computed, insert_at) =
                 match intended_rank(&items, before_id.as_deref(), after_id.as_deref()) {
                     Ok(value) => value,
-                    Err(RankError::Missing(id)) => return Ok(MoveOutcome::MissingNeighbour(id)),
+                    Err(RankError::Missing(id)) => {
+                        // Report the reference the caller sent, never the
+                        // internal UUID used for the graph lookup.
+                        let reference = if before_id.as_deref() == Some(id.as_str()) {
+                            before.clone().unwrap_or(id)
+                        } else if after_id.as_deref() == Some(id.as_str()) {
+                            after.clone().unwrap_or(id)
+                        } else {
+                            id
+                        };
+                        return Ok(MoveOutcome::MissingNeighbour(reference));
+                    }
                     Err(RankError::InvalidOrder) => return Ok(MoveOutcome::InvalidOrder),
                 };
 
