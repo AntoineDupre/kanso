@@ -46,7 +46,7 @@ Captured from the M7 build; the PNG files are committed after review.
 cargo build
 KANSO_PASSWORD=dev KANSO_DATA_DIR=./data cargo run -- serve
 curl http://127.0.0.1:8087/api/health
-# {"status":"ok","version":"0.1.0","db":"ok"}
+# {"status":"ok","version":"0.2.0","db":"ok"}
 ```
 
 `cargo run -- serve --port 9000 --data-dir /tmp/kanso` replaces the port in

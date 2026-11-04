@@ -227,7 +227,7 @@ Check the container and the loopback endpoint:
 ```sh
 sudo -u "${KANSO_USER}" -H env XDG_RUNTIME_DIR="/run/user/$(id -u "${KANSO_USER}")" podman ps
 curl -fsS http://127.0.0.1:${KANSO_PORT}/api/health
-# {"status":"ok","version":"0.1.0","db":"ok"}
+# {"status":"ok","version":"0.2.0","db":"ok"}
 ```
 
 The Quadlet has `HealthCmd` on `/api/health`, so `podman ps` should eventually
