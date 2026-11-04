@@ -1,4 +1,4 @@
-# Manual UI testing (M3)
+# Manual UI testing
 
 The board is a plain ES-module SPA served by `kanso serve`; there is no build
 step. Run the automated checks first:
@@ -82,11 +82,17 @@ Focus the page (not an input) and try:
 - `j` / `k` selects the next / previous visible card, scrolls it into view and
   opens its panel.
 - `m` opens the **Move to…** menu for the selected card.
-- `Esc` closes the panel.
+- `Esc` closes the panel or an open dialog.
+- `?` (Shift+/) opens **Keyboard shortcuts**. The dialog lists `n`, `/`, `j`,
+  `k`, `m`, `Esc` and `?`; focus moves into it, `Esc` closes it and focus
+  returns to whatever was focused before. Clicking the `?` button in the top
+  bar opens the same dialog.
+- The page behind the help dialog does not scroll, and the dialog is usable
+  with Tab/Shift+Tab alone.
 
-Shortcuts must do nothing while an input, textarea or select has focus. Tab
-through the top bar, columns and panel controls; every action is reachable and
-has a visible focus ring.
+Shortcuts must do nothing while an input, textarea or select has focus, or while
+Ctrl, Alt or Cmd is held. Tab through the top bar, columns and panel controls;
+every action is reachable and has a visible focus ring.
 
 ## 5. Two tabs and live updates
 
@@ -194,13 +200,48 @@ Network panel.
 4. Scroll the board horizontally and vertically; the top bar and page stay
    usable, and the board has no double scrollbar surprises.
 
-## 11. Notifications (optional)
+## 11. Notifications
 
-1. Click the bell control (never on page load) and grant permission.
-2. Hide the tab (switch windows) and, from another tab or the API, move a card to
-   In review. A single browser notification fires. (The `attention` flag is
-   written by the agent adapter in M5; for M3 the In review branch is the
-   reachable notification path.)
-3. Click the bell once to turn notifications off, deny permission in browser
-   settings, then click the bell again: a warning toast explains that
-   notifications are blocked and no permission prompt loops.
+1. Open **Settings → Export**. The Notifications block shows the current
+   permission state. With a fresh browser profile it says **Not requested**;
+   no permission prompt appears on page load.
+2. Turn the switch on: the browser asks for permission. Grant it; the state
+   changes to **Granted**, the bell in the top bar becomes active and the
+   **Send a test notification** row appears.
+3. Click **Send a test notification**: a notification appears immediately even
+   though this tab is visible, and a success toast confirms it.
+4. Hide the tab (switch windows) and, from another tab or the API, move a card to
+   In review or set `attention`. A single browser notification fires. (The
+   `attention` flag is written by the agent adapter in M5; the In review branch
+   is the reachable path without it.)
+5. Turn the switch off from either the bell or the settings block: both reflect
+   the change without a reload, and no notification fires for the next In review
+   move.
+6. Deny permission in the browser's site settings, then reload: the block shows
+   **Blocked** with an explanation, the switch is disabled and no test row is
+   shown. Clicking the bell shows a warning instead of a permission loop.
+7. In a browser without the Notification API (or after removing it in DevTools),
+   the block stays visible, says the API is unsupported and hides the switch
+   instead of disappearing silently.
+
+## 12. Export
+
+1. Open **Settings → Export**. The page explains the dump and shows a single
+   **Download export** button; it does not fetch or download on load.
+2. Create a project, a card with a checklist and a comment, archive one card
+   **and** one project, and have an agent token create a proposal. Click
+   **Download export**:
+   a `kanso-export-YYYYMMDD-HHMMSS.json` file downloads and a summary appears
+   with the JSON version and project/card/comment counts.
+3. Open the file: `version` is `1`, `exported_at` is Unix milliseconds,
+   `projects` contains active and archived projects, `tasks` contains active,
+   archived and proposed cards with `checklist` and `dependencies`, and
+   `comments` reference existing `task_reference` values. Activity is absent.
+4. In DevTools, block the API or stop the server and click the button: the
+   normal error toast appears. With an expired session the login screen returns
+   instead of a blank download tab (the UI fetches and downloads a Blob rather
+   than opening `/api/export.json` in a new window).
+5. Using an agent token, `curl -i -H "Authorization: Bearer kanso_…"
+   http://127.0.0.1:8087/api/export.json` returns `403 forbidden`; a human token
+   or the cookie session returns the dump with `Content-Type: application/json`,
+   `Content-Disposition: attachment; …` and `Cache-Control: no-store`.

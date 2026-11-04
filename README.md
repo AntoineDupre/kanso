@@ -8,6 +8,32 @@ reference for the architecture, data model, HTTP API, CLI and roadmap; the code
 and its tests show what is implemented today. This README covers building,
 running, testing and configuring the project.
 
+## Features
+
+- Project boards with six fixed columns, drag & drop, a global cross-project
+  view and a proposal inbox.
+- Cards with Markdown descriptions, labels, due dates, checklists, comments,
+  dependencies, claims and an activity log.
+- A CLI and agent skill for the pull flow, plus an optional OpenChamber adapter
+  that dispatches a card into an agent session and follows it.
+- A versioned JSON export of every project, card, label and comment from
+  **Settings → Export** or `GET /api/export.json`.
+- Opt-in browser notifications when a card needs attention or enters review
+  while the tab is hidden.
+- Keyboard shortcuts, including `n`, `/`, `j`/`k`, `m`, `Esc` and `?`; the
+  question-mark button in the top bar opens the same help dialog.
+
+## Screenshots
+
+Captured from the M7 build; the PNG files are committed after review.
+
+| | |
+| --- | --- |
+| ![Board, light theme](docs/screenshots/m7/board-light.png) | ![Board, dark theme](docs/screenshots/m7/board-dark.png) |
+| ![Card panel](docs/screenshots/m7/card-panel.png) | ![Global view](docs/screenshots/m7/global-view.png) |
+| ![Proposal inbox](docs/screenshots/m7/inbox.png) | ![Integration settings](docs/screenshots/m7/integration-settings.png) |
+| ![Mobile board](docs/screenshots/m7/mobile.png) | |
+
 ## Requirements
 
 - Rust 1.89 or newer (`rust-version` in `Cargo.toml`)
@@ -41,6 +67,11 @@ curl http://127.0.0.1:8087/api/health
 
 Logs go to stdout without ANSI colours, which is journald-friendly. SIGINT and
 SIGTERM trigger a graceful shutdown with a 10-second drain deadline.
+
+Browser notifications and keyboard shortcuts have no server configuration.
+Notifications are requested only after a user action — the bell or the switch
+on **Settings → Export** — and `?` opens the shortcut help unless an input is
+focused.
 
 ## CLI
 
@@ -167,7 +198,7 @@ Failed logins are limited to five per minute per client address (`429`,
 an `Origin` (or `Referer`) whose host matches the request `Host` or
 `KANSO_PUBLIC_URL`; bearer-token requests are exempt from CSRF checks. A cookie
 request to `GET /api/agent/next?claim=1` mutates state, so it needs the same
-origin check.
+origin check; read-only GETs such as `/api/export.json` do not.
 
 ### Projects
 
@@ -295,6 +326,7 @@ the full reordered `checklist`), and `checklist.deleted` carries `task_id` and
 | `DELETE` | `/api/tasks/:ref/checklist/:item` | Human only in M2 |
 | `GET`/`POST` | `/api/tokens` | `{name,scope}`; the `kanso_` token is returned once only; `ui` is reserved |
 | `DELETE` | `/api/tokens/:id` | Revoke; repeating it is idempotent |
+| `GET` | `/api/export.json` | Human only; versioned dump of projects, labels, all cards (with checklists and dependencies) and comments; downloadable attachment with `Cache-Control: no-store` |
 | `POST` | `/api/backup` | Human only; `VACUUM INTO` under `<data_dir>/backups/`; body `{dir?}` resolves under the data directory |
 
 Agent-scoped tokens may read projects, tasks, labels, boards, the inbox and
