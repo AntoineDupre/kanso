@@ -1,0 +1,93 @@
+# Install the rendered file as /etc/nginx/conf.d/kanso.conf, then run
+# `sudo nginx -t` before reloading nginx.
+#
+# TLS is supplied at render time. The backend listens only on loopback
+# (Quadlet PublishPort=127.0.0.1:__KANSO_PORT__:8087).
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name __KANSO_DOMAIN__;
+
+    access_log /var/log/nginx/__KANSO_DOMAIN__.access.log;
+    error_log /var/log/nginx/__KANSO_DOMAIN__.error.log;
+
+    # TLS is rendered from deploy/deploy.env (KANSO_TLS_INCLUDE or
+    # KANSO_TLS_SNIPPET); this template deliberately contains no host path or
+    # certificate path. deploy/tls.conf.example is the TLSRef 6.0 modern
+    # reference for the snippet option.
+    __KANSO_TLS__
+
+    # The board only accepts JSON and Markdown text; 2 MiB is plenty.
+    client_max_body_size 2m;
+
+    location / {
+        proxy_pass http://127.0.0.1:__KANSO_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # The UI is a live board; never buffer or cache API/static responses.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 60s;
+    }
+
+    # Server-side VACUUM INTO backups can legitimately take minutes. The CLI
+    # waits up to 600 s; leave a little headroom so a public call is not cut
+    # off after the general 60 s read timeout.
+    location = /api/backup {
+        proxy_pass http://127.0.0.1:__KANSO_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 660s;
+        proxy_send_timeout 660s;
+    }
+
+    # Dispatch creates an OpenChamber worktree/session synchronously: the
+    # adapter waits up to 150 s plus 30 s for permission auto-accept.
+    location ~ ^/api/tasks/[^/]+/dispatch$ {
+        proxy_pass http://127.0.0.1:__KANSO_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 240s;
+        proxy_send_timeout 240s;
+    }
+
+    # Server-Sent Events: a long-lived stream that must reach the browser as it
+    # is written. Buffering or a short read timeout breaks it silently.
+    location = /api/events {
+        proxy_pass http://127.0.0.1:__KANSO_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        gzip off;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        tcp_nodelay on;
+        add_header X-Accel-Buffering "no" always;
+
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 1800s;
+        proxy_read_timeout 1800s;
+    }
+}

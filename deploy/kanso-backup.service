@@ -1,0 +1,20 @@
+[Unit]
+Description=Kanso SQLite backup
+After=kanso.service
+Wants=kanso.service
+
+[Service]
+Type=oneshot
+# A persistent timer can fire during boot before the HTTP listener is up. Wait
+# for the container health check (which probes /api/health) first.
+ExecStartPre=/usr/bin/podman wait --condition=healthy --interval=2s kanso
+# Covers the health wait plus the CLI's 600 s VACUUM INTO deadline.
+TimeoutStartSec=900
+# `kanso backup` is a CLI command: it asks the running server to VACUUM INTO
+# /data/backups. The container's CLI config (URL + human API token) lives at
+# /data/.config/kanso/config.toml, mode 0600; see docs/DEPLOY.md.
+ExecStart=/usr/bin/podman exec kanso kanso backup
+# Keep the newest 14 dumps. This MUST run inside the container: rootless Podman
+# maps container uid 1000 to a subuid on the host, so the host user cannot
+# delete the files the container wrote. The container user owns them.
+ExecStartPost=/usr/bin/podman exec kanso sh -c 'cd /data/backups 2>/dev/null || exit 0; ls -1t kanso-*.db 2>/dev/null | tail -n +15 | while IFS= read -r file; do rm -f -- "$$file"; done'

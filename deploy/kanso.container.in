@@ -1,0 +1,28 @@
+[Unit]
+Description=kanso (rootless Podman)
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+ContainerName=kanso
+Image=__KANSO_IMAGE__
+# KANSO_PORT is the host-published port; the container still listens on 8087.
+PublishPort=127.0.0.1:__KANSO_PORT__:8087
+EnvironmentFile=%h/.config/containers/systemd/kanso.env
+Volume=__KANSO_HOME__/data:/data:Z
+# SQLite and VACUUM INTO would otherwise create 0644 files readable by every
+# local account; the container's umask makes the database and dumps 0600.
+PodmanArgs=--umask=0077
+AutoUpdate=registry
+HealthCmd=wget -qO- http://127.0.0.1:8087/api/health
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=20s
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

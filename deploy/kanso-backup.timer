@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Kanso backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+# Spread the job a little; still well before the 04:00 update window.
+RandomizedDelaySec=10m
+Persistent=true
+Unit=kanso-backup.service
+
+[Install]
+WantedBy=timers.target

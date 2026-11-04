@@ -9,6 +9,11 @@
 *.db-shm
 .env
 *.env.local
+# Real deployment values and rendered artefacts, never committed.
+deploy/kanso.env
+deploy/deploy.env
+deploy/tls.conf
+deploy/out/
 
 # Tooling
 node_modules/
