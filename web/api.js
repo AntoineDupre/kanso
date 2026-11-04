@@ -30,7 +30,10 @@ function query(params) {
   return text ? `?${text}` : "";
 }
 
-async function request(path, { method = "GET", body, allowUnauthorized = false, signal } = {}) {
+async function requestResponse(
+  path,
+  { method = "GET", body, allowUnauthorized = false, signal } = {}
+) {
   const headers = { Accept: "application/json" };
   let payload;
   if (body !== undefined) {
@@ -71,10 +74,27 @@ async function request(path, { method = "GET", body, allowUnauthorized = false, 
     throw new ApiError(message, { code, status: response.status, body: envelope });
   }
 
+  return response;
+}
+
+async function request(path, options = {}) {
+  const response = await requestResponse(path, options);
   if (response.status === 204) return null;
   const type = response.headers.get("content-type") || "";
   if (!type.includes("application/json")) return null;
   return response.json();
+}
+
+async function download(path) {
+  const response = await requestResponse(path);
+  const disposition = response.headers.get("content-disposition") || "";
+  const match = disposition.match(/filename="([^"]+)"/);
+  const blob = await response.blob();
+  return {
+    blob,
+    filename: match ? match[1] : "kanso-export.json",
+    text: await blob.text()
+  };
 }
 
 const enc = encodeURIComponent;
@@ -124,6 +144,8 @@ export const api = {
   claimTask: (reference) => request(`/api/tasks/${enc(reference)}/claim`, { method: "POST" }),
 
   releaseTask: (reference) => request(`/api/tasks/${enc(reference)}/release`, { method: "POST" }),
+
+  exportDump: () => download("/api/export.json"),
 
   dispatchTask: (reference) =>
     request(`/api/tasks/${enc(reference)}/dispatch`, { method: "POST" }),

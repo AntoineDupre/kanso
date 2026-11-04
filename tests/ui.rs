@@ -211,6 +211,7 @@ async fn deep_links_serve_the_shell() {
         "/settings/projects",
         "/settings/tokens",
         "/settings/integration",
+        "/settings/export",
         "/p/ALP",
         "/p/ALP/task/42",
     ] {

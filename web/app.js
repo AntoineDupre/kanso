@@ -21,7 +21,8 @@ import {
   openMoveMenu,
   confirmDialog,
   hasModal,
-  closeAllModals
+  closeAllModals,
+  openModal
 } from "./forms.js";
 
 const LS = {
@@ -321,6 +322,10 @@ function buildShell() {
   });
   notifications.classList.toggle("active", state.notificationsEnabled);
 
+  const help = iconButton(t("app.keyboardHelp"), "help", {
+    onClick: openKeyboardHelp
+  });
+
   const settings = iconButton(t("app.settings"), "gear", {
     onClick: () => navigate("/settings/projects")
   });
@@ -351,6 +356,7 @@ function buildShell() {
       globalToggle,
       newCard,
       notifications,
+      help,
       settings,
       logout
     ])
@@ -412,6 +418,7 @@ function buildShell() {
     search,
     newCard,
     notifications,
+    help,
     settings,
     logout,
     globalToggle,
@@ -503,7 +510,9 @@ function renderChrome() {
   dom.tabInbox.classList.toggle("active", route.name === "inbox");
   dom.settings.classList.toggle(
     "active",
-    ["settings-projects", "settings-tokens", "settings-integration"].includes(route.name)
+    ["settings-projects", "settings-tokens", "settings-integration", "settings-export"].includes(
+      route.name
+    )
   );
   dom.globalToggle.hidden = route.name !== "global";
   dom.search.value = state.search;
@@ -572,6 +581,7 @@ function parseRoute(pathname) {
   if (path === "/settings/projects") return { name: "settings-projects" };
   if (path === "/settings/tokens") return { name: "settings-tokens" };
   if (path === "/settings/integration") return { name: "settings-integration" };
+  if (path === "/settings/export") return { name: "settings-export" };
   let match = path.match(/^\/p\/([^/]+)$/);
   if (match) {
     const key = decodePart(match[1]);
@@ -647,6 +657,10 @@ async function renderRoute() {
     case "settings-integration":
       showPageRegion();
       await renderSettingsIntegration(token);
+      break;
+    case "settings-export":
+      showPageRegion();
+      await renderSettingsExport(token);
       break;
     default:
       showPageRegion();
@@ -1027,10 +1041,22 @@ function settingsHeader(active) {
     event.preventDefault();
     navigate("/settings/integration");
   });
+  const exportTab = el(
+    "a",
+    {
+      class: `settings-tab${active === "export" ? " active" : ""}`,
+      href: "/settings/export"
+    },
+    [icon("download", { size: 15 }), el("span", { text: t("settings.export") })]
+  );
+  exportTab.addEventListener("click", (event) => {
+    event.preventDefault();
+    navigate("/settings/export");
+  });
   return el("header", { class: "page-header" }, [
     el("div", {}, [
       el("h1", { class: "page-title", text: t("settings.title") }),
-      el("nav", { class: "settings-tabs" }, [projects, tokens, integration])
+      el("nav", { class: "settings-tabs" }, [projects, tokens, integration, exportTab])
     ])
   ]);
 }
@@ -1429,6 +1455,239 @@ async function renderSettingsIntegration(token) {
   }
 }
 
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = el("a", { href: url, download: filename, hidden: true });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  // Some browsers fetch the Blob after their download prompt is confirmed.
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+function notificationPermission() {
+  if (!("Notification" in window)) return "unsupported";
+  const permission = Notification.permission;
+  return ["default", "granted", "denied"].includes(permission) ? permission : "default";
+}
+
+function notificationsSettings() {
+  const permission = notificationPermission();
+  const supported = permission !== "unsupported";
+  const granted = permission === "granted";
+  const tone =
+    permission === "granted" ? "success" : permission === "denied" || !supported ? "warning" : "neutral";
+  const hints = {
+    unsupported: "settings.notificationsUnsupportedHint",
+    denied: "settings.notificationsDeniedHint",
+    granted: state.notificationsEnabled
+      ? "settings.notificationsGrantedHint"
+      : "settings.notificationsOffHint",
+    default: "settings.notificationsDefaultHint"
+  };
+
+  const toggle = el("input", {
+    type: "checkbox",
+    checked: state.notificationsEnabled && granted,
+    disabled: !supported || permission === "denied",
+    "aria-label": t("settings.notificationsEnable")
+  });
+  toggle.addEventListener("change", () => {
+    setNotificationsFromSettings(toggle.checked).catch((error) => {
+      if (error.status !== 401) toastForError(error, t);
+    });
+  });
+
+  const rows = [
+    el("article", { class: "settings-row" }, [
+      icon("bell", { size: 18 }),
+      el("div", { class: "settings-row-main" }, [
+        el("div", { class: "settings-row-title" }, [
+          el("span", { class: "settings-row-name", text: t("settings.notificationsPermission") }),
+          el("span", {
+            class: `badge badge-${tone}`,
+            text: t(`settings.notificationPermission.${permission}`)
+          })
+        ]),
+        el("p", { class: "muted settings-row-description", text: t(hints[permission]) })
+      ]),
+      supported
+        ? el("div", { class: "settings-row-actions" }, [
+            el("label", { class: "notification-switch" }, [
+              toggle,
+              el("span", { text: t("settings.notificationsEnable") })
+            ])
+          ])
+        : null
+    ])
+  ];
+  if (granted) {
+    rows.push(
+      el("article", { class: "settings-row" }, [
+        icon("alert", { size: 18 }),
+        el("div", { class: "settings-row-main" }, [
+          el("div", { class: "settings-row-title" }, [
+            el("span", { class: "settings-row-name", text: t("settings.notificationsTest") })
+          ]),
+          el("p", {
+            class: "muted settings-row-description",
+            text: t("settings.notificationsTestHint")
+          })
+        ]),
+        el("div", { class: "settings-row-actions" }, [
+          el(
+            "button",
+            {
+              type: "button",
+              class: "button button-secondary button-small",
+              onClick: sendTestNotification
+            },
+            [icon("bell", { size: 14 }), el("span", { text: t("settings.notificationsTest") })]
+          )
+        ])
+      ])
+    );
+  }
+
+  return el("section", { class: "settings-notifications" }, [
+    el("h2", { class: "settings-section-title", tabindex: "-1", text: t("settings.notifications") }),
+    el("p", { class: "page-subtitle", text: t("settings.notificationsDescription") }),
+    el("div", { class: "settings-list" }, rows)
+  ]);
+}
+
+function refreshNotificationsSettings({ focusToggle = false } = {}) {
+  if (state.route.name !== "settings-export" || !state.dom) return;
+  const current = state.dom.pageRegion.querySelector(".settings-notifications");
+  if (!current) return;
+  const replacement = notificationsSettings();
+  current.replaceWith(replacement);
+  if (!focusToggle) return;
+  const target =
+    replacement.querySelector(".notification-switch input:not([disabled])") ||
+    replacement.querySelector(".settings-section-title");
+  if (target) target.focus();
+}
+
+async function setNotificationsFromSettings(enabled) {
+  if (!enabled) {
+    state.notificationsEnabled = false;
+    localStorage.removeItem(LS.notifications);
+    renderChrome();
+    refreshNotificationsSettings({ focusToggle: true });
+    return;
+  }
+
+  const permission = notificationPermission();
+  if (permission === "unsupported") {
+    toast(t("app.notificationsUnsupported"), "warning");
+    refreshNotificationsSettings({ focusToggle: true });
+    return;
+  }
+  if (permission === "denied") {
+    toast(t("app.notificationsBlocked"), "warning");
+    refreshNotificationsSettings({ focusToggle: true });
+    return;
+  }
+
+  let result = permission;
+  if (permission === "default") {
+    try {
+      result = await Notification.requestPermission();
+    } catch {
+      result = "denied";
+    }
+  }
+
+  if (result === "granted") {
+    state.notificationsEnabled = true;
+    localStorage.setItem(LS.notifications, "1");
+    toast(t("app.notificationsOn"), "success");
+  } else {
+    state.notificationsEnabled = false;
+    localStorage.removeItem(LS.notifications);
+    toast(t("app.notificationsBlocked"), "warning");
+  }
+  renderChrome();
+  refreshNotificationsSettings({ focusToggle: true });
+}
+
+function sendTestNotification() {
+  if (notificationPermission() !== "granted") {
+    toast(t("settings.notificationsTestNeedsPermission"), "warning");
+    return;
+  }
+  try {
+    new Notification(t("settings.notificationsTestTitle"), {
+      body: t("settings.notificationsTestBody")
+    });
+    toast(t("settings.notificationsTestSent"), "success");
+  } catch {
+    toast(t("settings.notificationsTestFailed"), "warning");
+  }
+}
+
+async function renderSettingsExport(token) {
+  if (!state.dom || state.routeToken !== token) return;
+  const human = state.me && state.me.scope === "human";
+  const page = el("div", { class: "page" }, [settingsHeader("export")]);
+  if (!human) {
+    page.append(
+      el("p", {
+        class: "field-hint",
+        text: t("settings.humanOnly", { what: t("settings.export") })
+      })
+    );
+    state.dom.pageRegion.replaceChildren(page);
+    return;
+  }
+
+  const summary = el("p", { class: "field-hint", role: "status", hidden: true });
+  const button = el(
+    "button",
+    { type: "button", class: "button button-primary" },
+    [icon("download", { size: 16 }), el("span", { text: t("settings.exportDownload") })]
+  );
+  button.addEventListener("click", async () => {
+    const label = button.querySelector("span");
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    if (label) label.textContent = t("settings.exporting");
+    try {
+      const result = await api.exportDump();
+      const data = JSON.parse(result.text);
+      downloadBlob(result.blob, result.filename);
+      const projects = Array.isArray(data.projects) ? data.projects.length : 0;
+      const tasks = Array.isArray(data.tasks) ? data.tasks.length : 0;
+      const comments = Array.isArray(data.comments) ? data.comments.length : 0;
+      const count = (value, oneKey, manyKey) =>
+        `${value} ${t(value === 1 ? oneKey : manyKey)}`;
+      summary.hidden = false;
+      summary.textContent = t("settings.exportSummary", {
+        version: data.version,
+        projects: count(projects, "settings.exportProjectOne", "settings.exportProjects"),
+        tasks: count(tasks, "settings.exportCardOne", "settings.exportCards"),
+        comments: count(comments, "settings.exportCommentOne", "settings.exportComments")
+      });
+      toast(t("settings.exportReady"), "success");
+    } catch (error) {
+      if (error.status !== 401) toastForError(error, t);
+    } finally {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      if (label) label.textContent = t("settings.exportDownload");
+    }
+  });
+
+  page.append(
+    el("p", { class: "page-subtitle", text: t("settings.exportDescription") }),
+    el("div", { class: "page-toolbar" }, [button]),
+    summary,
+    notificationsSettings()
+  );
+  state.dom.pageRegion.replaceChildren(page);
+}
+
 async function loadProjectsQuietly() {
   try {
     const [projects, labels] = await Promise.all([api.projects(), api.labels()]);
@@ -1780,6 +2039,7 @@ async function refreshAfterReconnect() {
     if (state.route.name === "settings-projects") await renderSettingsProjects(state.routeToken);
     if (state.route.name === "settings-tokens") await renderSettingsTokens(state.routeToken);
     if (state.route.name === "settings-integration") await renderSettingsIntegration(state.routeToken);
+    if (state.route.name === "settings-export") await renderSettingsExport(state.routeToken);
     // Refetch an open card too, but do not discard an active edit or draft.
     if (state.panel && state.panel.currentReference) await state.panel.reload();
     renderChrome();
@@ -2052,6 +2312,7 @@ async function toggleNotifications() {
     state.notificationsEnabled = false;
     localStorage.removeItem(LS.notifications);
     renderChrome();
+    refreshNotificationsSettings();
     return;
   }
   if (!("Notification" in window)) {
@@ -2071,6 +2332,7 @@ async function toggleNotifications() {
     toast(t("app.notificationsBlocked"), "warning");
   }
   renderChrome();
+  refreshNotificationsSettings();
 }
 
 async function logoutFlow() {
@@ -2092,6 +2354,34 @@ async function logoutFlow() {
 // ---------------------------------------------------------------------------
 // Keyboard shortcuts
 
+function openKeyboardHelp() {
+  const shortcuts = [
+    ["n", t("help.newCard")],
+    ["/", t("help.search")],
+    ["j", t("help.nextCard")],
+    ["k", t("help.previousCard")],
+    ["m", t("help.moveMenu")],
+    ["Esc", t("help.close")],
+    ["?", t("help.help")]
+  ];
+  const list = el(
+    "dl",
+    { class: "shortcut-list" },
+    shortcuts.flatMap(([key, label]) => [
+      el("dt", {}, [el("kbd", { text: key })]),
+      el("dd", { text: label })
+    ])
+  );
+  openModal({
+    title: t("help.title"),
+    size: "small",
+    body: el("div", { class: "shortcut-help" }, [
+      el("p", { class: "field-hint", text: t("help.description") }),
+      list
+    ])
+  });
+}
+
 function onGlobalKeyDown(event) {
   if (hasModal()) return;
   if (event.defaultPrevented) return;
@@ -2107,6 +2397,11 @@ function onGlobalKeyDown(event) {
   }
   if (!state.me) return;
 
+  if (event.key === "?") {
+    event.preventDefault();
+    openKeyboardHelp();
+    return;
+  }
   if (event.key === "n") {
     if (isBoardRoute() || state.route.name === "inbox") {
       event.preventDefault();
