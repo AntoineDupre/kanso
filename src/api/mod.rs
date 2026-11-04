@@ -28,6 +28,7 @@ mod dependencies;
 mod dispatch;
 mod error;
 mod events;
+mod export;
 mod inbox;
 mod integration;
 mod labels;
@@ -364,6 +365,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/tokens", get(tokens::list).post(tokens::create))
         .route("/api/tokens/{id}", axum::routing::delete(tokens::revoke))
+        .route("/api/export.json", get(export::download))
         .route("/api/backup", post(backup::create))
 }
 

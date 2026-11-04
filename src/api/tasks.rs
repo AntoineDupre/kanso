@@ -278,7 +278,7 @@ fn dependency_ref(row: &Row<'_>) -> rusqlite::Result<DependencyRef> {
     })
 }
 
-fn load_dependencies(
+pub(super) fn load_dependencies(
     connection: &rusqlite::Connection,
     task_id: &str,
 ) -> crate::error::Result<Dependencies> {
@@ -305,7 +305,7 @@ fn load_dependencies(
     Ok(Dependencies { blocked_by, blocks })
 }
 
-fn load_checklist(
+pub(super) fn load_checklist(
     connection: &rusqlite::Connection,
     task_id: &str,
 ) -> crate::error::Result<Vec<ChecklistItem>> {

@@ -3465,6 +3465,257 @@ async fn agent_header_overrides_attribution_for_agent_tokens_only() {
 }
 
 #[tokio::test]
+async fn export_dump_is_complete_versioned_and_human_only() {
+    use std::collections::HashSet;
+
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    app.create_project(&cookie, "ALP").await;
+    let beta = app.create_project(&cookie, "BET").await;
+    app.create_label(&cookie, "urgent", "#dc2626").await;
+
+    let active = app
+        .create_task(
+            &cookie,
+            json!({
+                "project_key": "ALP",
+                "title": "Active card",
+                "description": "The active description",
+                "priority": "high",
+                "labels": ["urgent"]
+            }),
+        )
+        .await;
+    let active_ref = active["reference"].as_str().expect("reference").to_owned();
+    app.cookie_post(
+        &format!("/api/tasks/{active_ref}/checklist"),
+        Some(json!({"text": "first step"})),
+        &cookie,
+    )
+    .await;
+    let linked = app
+        .cookie_post(
+            &format!("/api/tasks/{active_ref}/session"),
+            Some(json!({
+                "session_id": "ses_export",
+                "directory": "/tmp/export",
+                "status": "idle"
+            })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(linked.status, StatusCode::OK, "{:?}", linked.body);
+    let comment = app
+        .cookie_post(
+            &format!("/api/tasks/{active_ref}/comment"),
+            Some(json!({"body": "export comment"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(comment.status, StatusCode::CREATED, "{:?}", comment.body);
+
+    let agent = app.create_token(&cookie, "export-agent", "agent").await;
+    let agent_token = agent["token"].as_str().expect("token");
+    let claimed = app
+        .request(
+            Method::POST,
+            &format!("/api/tasks/{active_ref}/claim"),
+            None,
+            None,
+            Some(agent_token),
+            None,
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{:?}", claimed.body);
+
+    let dependent = app
+        .create_task(
+            &cookie,
+            json!({"project_key": "ALP", "title": "Dependent card"}),
+        )
+        .await;
+    let dependent_ref = dependent["reference"]
+        .as_str()
+        .expect("reference")
+        .to_owned();
+    let dependency = app
+        .cookie_post(
+            &format!("/api/tasks/{dependent_ref}/dependencies"),
+            Some(json!({"blocked_by": [active_ref]})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(dependency.status, StatusCode::OK, "{:?}", dependency.body);
+
+    let archived = app
+        .create_task(
+            &cookie,
+            json!({"project_key": "BET", "title": "Archived card"}),
+        )
+        .await;
+    let archived_ref = archived["reference"]
+        .as_str()
+        .expect("reference")
+        .to_owned();
+    let archived = app
+        .cookie_post(&format!("/api/tasks/{archived_ref}/archive"), None, &cookie)
+        .await;
+    assert_eq!(archived.status, StatusCode::OK);
+
+    let proposal = app
+        .request(
+            Method::POST,
+            "/api/tasks",
+            Some(json!({"project_key": "ALP", "title": "Proposed card"})),
+            None,
+            Some(agent_token),
+            None,
+        )
+        .await;
+    assert_eq!(proposal.status, StatusCode::CREATED, "{:?}", proposal.body);
+    let proposed_ref = proposal.body["reference"]
+        .as_str()
+        .expect("reference")
+        .to_owned();
+
+    let beta_id = beta["id"].as_str().expect("project id");
+    let archived_project = app
+        .cookie_post(&format!("/api/projects/{beta_id}/archive"), None, &cookie)
+        .await;
+    assert_eq!(archived_project.status, StatusCode::OK);
+
+    // Cookie sessions need no CSRF origin header for this GET.
+    let export = app.get("/api/export.json", Some(&cookie), None).await;
+    assert_eq!(export.status, StatusCode::OK, "{:?}", export.body);
+    let content_type = export
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert_eq!(content_type, "application/json");
+    assert_eq!(
+        export
+            .headers
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let disposition = export
+        .headers
+        .get(header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .expect("content disposition");
+    let stamp = disposition
+        .strip_prefix("attachment; filename=\"kanso-export-")
+        .and_then(|value| value.strip_suffix(".json\""))
+        .expect("export filename");
+    assert_eq!(stamp.len(), 15, "{stamp}");
+    assert_eq!(&stamp[8..9], "-", "{stamp}");
+    assert!(stamp
+        .chars()
+        .enumerate()
+        .all(|(index, character)| index == 8 || character.is_ascii_digit()));
+
+    let body = &export.body;
+    assert_eq!(body["version"], 1);
+    assert!(body["exported_at"].as_i64().is_some());
+    assert!(body.get("activity").is_none());
+
+    let projects = body["projects"].as_array().expect("projects");
+    let keys: Vec<&str> = projects
+        .iter()
+        .map(|project| project["key"].as_str().expect("key"))
+        .collect();
+    assert!(keys.contains(&"ALP"));
+    assert!(keys.contains(&"BET"));
+    let beta_project = projects
+        .iter()
+        .find(|project| project["key"] == "BET")
+        .expect("archived project");
+    assert!(beta_project["archived_at"].is_number());
+
+    let labels = body["labels"].as_array().expect("labels");
+    assert!(labels.iter().any(|label| label["name"] == "urgent"));
+
+    let tasks = body["tasks"].as_array().expect("tasks");
+    let references: HashSet<&str> = tasks
+        .iter()
+        .map(|task| task["reference"].as_str().expect("reference"))
+        .collect();
+    let by_ref = |reference: &str| {
+        tasks
+            .iter()
+            .find(|task| task["reference"] == reference)
+            .unwrap_or_else(|| panic!("task {reference} missing from export"))
+    };
+
+    let active_task = by_ref(&active_ref);
+    assert_eq!(active_task["state"], "active");
+    assert_eq!(active_task["priority"], "high");
+    assert_eq!(active_task["description"], "The active description");
+    assert_eq!(active_task["labels"][0]["name"], "urgent");
+    assert_eq!(active_task["checklist"][0]["text"], "first step");
+    assert_eq!(active_task["session_id"], "ses_export");
+    assert_eq!(active_task["session_directory"], "/tmp/export");
+    assert_eq!(active_task["session_status"], "idle");
+    assert_eq!(active_task["claimed_by"], "export-agent");
+    assert!(active_task.get("activity").is_none());
+
+    let dependent_task = by_ref(&dependent_ref);
+    assert_eq!(
+        dependent_task["dependencies"]["blocked_by"][0]["reference"],
+        active_ref
+    );
+
+    assert_eq!(by_ref(&archived_ref)["state"], "archived");
+    assert!(by_ref(&archived_ref)["archived_at"].is_number());
+    assert_eq!(by_ref(&proposed_ref)["state"], "proposed");
+
+    let comments = body["comments"].as_array().expect("comments");
+    let exported_comment = comments
+        .iter()
+        .find(|comment| comment["body"] == "export comment")
+        .expect("exported comment");
+    assert_eq!(exported_comment["task_reference"], active_ref);
+    for comment in comments {
+        let reference = comment["task_reference"]
+            .as_str()
+            .expect("comment task reference");
+        assert!(references.contains(reference), "{reference}");
+        assert!(tasks.iter().any(|task| task["id"] == comment["task_id"]));
+    }
+    for task in tasks {
+        for dependency in task["dependencies"]["blocked_by"]
+            .as_array()
+            .expect("blocked_by")
+        {
+            assert!(references.contains(
+                dependency["reference"]
+                    .as_str()
+                    .expect("dependency reference")
+            ));
+        }
+    }
+
+    let serialized = serde_json::to_string(body).expect("serialize export");
+    let round_trip: Value = serde_json::from_str(&serialized).expect("parse export");
+    assert_eq!(&round_trip, body);
+
+    let denied = app.get("/api/export.json", None, Some(agent_token)).await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    assert_eq!(denied.code(), "forbidden");
+
+    let human = app.create_token(&cookie, "export-human", "human").await;
+    let human_token = human["token"].as_str().expect("token");
+    let allowed = app.get("/api/export.json", None, Some(human_token)).await;
+    assert_eq!(allowed.status, StatusCode::OK, "{:?}", allowed.body);
+    // The same dump is returned in the same stable order.
+    for field in ["projects", "labels", "tasks", "comments"] {
+        assert_eq!(allowed.body[field], body[field], "{field}");
+    }
+}
+
+#[tokio::test]
 async fn backup_writes_a_timestamped_copy_under_the_data_directory() {
     let app = TestApp::new();
     let cookie = app.login().await;
