@@ -132,9 +132,10 @@ beside it, since the container image is the self-contained distribution.
 Production runs as a rootless Podman Quadlet behind host nginx, with a daily
 backup timer. The Quadlet, nginx and app env templates in `deploy/` are rendered
 by `deploy/render.sh` from `deploy/deploy.env` (see
-`deploy/deploy.env.example`); the backup units are used directly. The example
-domain is `kanso.example.com`. TLS is selected in `deploy/deploy.env`; the
-committed nginx template carries no certificate or host TLS paths. The full operator runbook — install, verification, update,
+`deploy/deploy.env.example`); the backup units and `kanso.network` are used
+directly. The example domain is `kanso.example.com`. TLS is selected in
+`deploy/deploy.env`; the committed nginx template carries no certificate or
+host TLS paths. The full operator runbook — install, verification, update,
 backup and restore, rollback and troubleshooting — is
 [docs/DEPLOY.md](docs/DEPLOY.md).
 

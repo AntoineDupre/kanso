@@ -8,6 +8,9 @@ ContainerName=kanso
 Image=__KANSO_IMAGE__
 # KANSO_PORT is the host-published port; the container still listens on 8087.
 PublishPort=127.0.0.1:__KANSO_PORT__:8087
+# The default rootless pasta netns shadows the host's LAN address inside the
+# container; a named bridge lets the adapter reach the host by its host alias.
+Network=kanso.network
 EnvironmentFile=%h/.config/containers/systemd/kanso.env
 Volume=__KANSO_HOME__/data:/data:Z
 # SQLite and VACUUM INTO would otherwise create 0644 files readable by every

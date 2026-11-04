@@ -24,6 +24,7 @@ browser ──https──> nginx (host, TLS) ──http──> kanso (rootless c
 | Data | `${KANSO_HOME}/data` → `/data`, SQLite + `backups/` |
 | Deployment values | `deploy/deploy.env` (gitignored; `deploy/deploy.env.example` committed) |
 | Quadlet source | `deploy/kanso.container.in` (rendered to `deploy/out/kanso.container`) |
+| Network unit | `deploy/kanso.network` (static) |
 | nginx source | `deploy/nginx.conf.in` (rendered to `deploy/out/nginx.conf`) |
 | Backup units | `deploy/kanso-backup.service`, `deploy/kanso-backup.timer` |
 | Release workflow | `.github/workflows/release.yml` |
@@ -142,11 +143,22 @@ rendered files are in `deploy/out/`; the service's Quadlet reads
 this user.
 
 ```sh
+sudo install -o "${KANSO_USER}" -g "${KANSO_USER}" -m 0644 deploy/kanso.network \
+  ${KANSO_HOME}/.config/containers/systemd/kanso.network
 sudo install -o "${KANSO_USER}" -g "${KANSO_USER}" -m 0644 deploy/out/kanso.container \
   ${KANSO_HOME}/.config/containers/systemd/kanso.container
 sudo install -o "${KANSO_USER}" -g "${KANSO_USER}" -m 0600 deploy/out/kanso.env.example \
   ${KANSO_HOME}/.config/containers/systemd/kanso.env
 ```
+
+Kanso uses the named bridge network `kanso.network` instead of Podman's default
+pasta netns. Under pasta, the host's own LAN address is shadowed inside the
+container and requests to it loop back to the container; on the bridge the
+OpenChamber adapter must use `http://host.containers.internal:3000` (Podman's
+host alias; on this host it resolves to `169.254.1.2`), not the LAN IP. This
+also means OpenChamber must listen on the address that alias maps to (the host's
+LAN/default-interface address), not only on `127.0.0.1`. Quadlet generates
+`kanso-network.service`; `kanso.service` gains a dependency on it.
 
 Fill in the secrets in the installed file. The render step has already substituted
 `KANSO_PUBLIC_URL`; replace the OpenChamber example URL only if you use the
@@ -164,7 +176,7 @@ fill the OpenChamber pair only if you use the adapter:
 
 ```ini
 KANSO_PASSWORD=<long random UI password>
-# KANSO_OPENCHAMBER_URL=<OpenChamber base URL, for example http://openchamber.example.com:3000>
+# KANSO_OPENCHAMBER_URL=http://host.containers.internal:3000
 # KANSO_OPENCHAMBER_TOKEN=<OpenChamber bearer token>
 ```
 
@@ -536,6 +548,7 @@ container is healthy without a login, and the public URL answers.
 | nginx 502 | `curl http://127.0.0.1:${KANSO_PORT}/api/health`; check the container is running and `proxy_pass http://127.0.0.1:${KANSO_PORT}`. `nginx -t` and `journalctl -u nginx`. |
 | Public URL works but SSE drops | The `/api/events` exact location must not buffer; check `proxy_buffering off`, `proxy_cache off`, `proxy_read_timeout 1800s`, and reload nginx. Browser devtools shows whether the stream is `text/event-stream`. |
 | Login succeeds but POSTs fail CSRF | `KANSO_PUBLIC_URL` must be `https://${KANSO_DOMAIN}`; nginx must send `Host`, `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`. |
+| `/api/integration` says `reachable:false` while OpenChamber runs | Confirm the container is on `kanso.network`, not the default pasta netns: `systemctl --user cat kanso.service` should show `Network=kanso.network`, and `podman inspect kanso --format '{{.NetworkSettings.Networks}}'` should list `kanso`. Check `podman exec kanso wget -qO- http://host.containers.internal:3000/api/version`; it must resolve to the expected host alias (`169.254.1.2` on this host), not the host's LAN IP. |
 | Backup service fails | `podman exec kanso kanso backup` by hand; verify `/data/.config/kanso/config.toml`, the human-scope token is not revoked, and the server is healthy. |
 | Backup files are root/subuid-owned | Expected under rootless Podman. Prune and inspect inside the container; use `sudo` for host copies. |
 | Timer never fires | `loginctl show-user "${KANSO_USER}" -p Linger`, `systemctl --user list-timers` as `${KANSO_USER}`, and `journalctl --user-unit kanso-backup.timer`. `Persistent=true` catches up after boot. |
@@ -548,6 +561,7 @@ container is healthy without a login, and the public URL answers.
 ```
 deploy/deploy.env.example       -> deploy/deploy.env (copy; gitignored)
 deploy/tls.conf.example         -> deploy/tls.conf (copy; gitignored, optional)
+deploy/kanso.network            -> ${KANSO_HOME}/.config/containers/systemd/kanso.network
 deploy/kanso.container.in       --render--> deploy/out/kanso.container
                                 -> ${KANSO_HOME}/.config/containers/systemd/kanso.container
 deploy/kanso.env.example.in     --render--> deploy/out/kanso.env.example
