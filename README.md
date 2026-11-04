@@ -122,6 +122,22 @@ podman run --rm -p 127.0.0.1:8087:8087 \
 The image is a multi-stage musl build on Alpine, runs as uid/gid 1000, keeps
 data in the `/data` volume, exposes port 8087 and probes `/api/health`.
 
+## Deployment
+
+The production image is `ghcr.io/dupremathieu/kanso:latest`; a `v*` git tag
+also publishes that tag and attaches the static
+`kanso-x86_64-unknown-linux-musl` binary to the GitHub release. That asset is a
+bare binary: run it from a source checkout or put the matching `web/` directory
+beside it, since the container image is the self-contained distribution.
+Production runs as a rootless Podman Quadlet behind host nginx, with a daily
+backup timer. The Quadlet, nginx and app env templates in `deploy/` are rendered
+by `deploy/render.sh` from `deploy/deploy.env` (see
+`deploy/deploy.env.example`); the backup units are used directly. The example
+domain is `kanso.example.com`. TLS is selected in `deploy/deploy.env`; the
+committed nginx template carries no certificate or host TLS paths. The full operator runbook — install, verification, update,
+backup and restore, rollback and troubleshooting — is
+[docs/DEPLOY.md](docs/DEPLOY.md).
+
 ## HTTP surface
 
 All API responses are JSON except the SSE stream; timestamps are Unix milliseconds. Failures use
