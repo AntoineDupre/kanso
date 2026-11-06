@@ -1750,6 +1750,7 @@ function cardFromDetail(detail) {
     attention: detail.attention,
     session_status: detail.session_status,
     blocked_from: detail.blocked_from,
+    blocked_reason: detail.blocked_reason,
     checklist_done: (detail.checklist || []).filter((item) => item.done).length,
     checklist_total: (detail.checklist || []).length,
     blocked: (detail.dependencies?.blocked_by || []).some((item) => item.status !== "done")

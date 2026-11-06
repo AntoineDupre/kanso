@@ -397,7 +397,7 @@ export class Panel {
     }
   }
 
-  async sendReply(detail) {
+  async sendReply() {
     const textarea = this.root.querySelector('textarea[data-draft="reply"]');
     if (!textarea || this.busy) return;
     const body = textarea.value.trim();
@@ -434,7 +434,8 @@ export class Panel {
     }
   }
 
-  async retryReply(detail, comment) {
+  async retryReply(comment) {
+    if (this.busy) return;
     const reference = this.reference;
     this.busy = true;
     try {
@@ -820,8 +821,9 @@ export class Panel {
             el("button", {
               type: "button",
               class: "button button-secondary button-small",
+              disabled: this.busy,
               text: failed ? t("panel.retry") : t("panel.retryAnyway"),
-              onClick: () => this.retryReply(detail, lastReply)
+              onClick: () => this.retryReply(lastReply)
             })
           ]
         )
@@ -868,7 +870,7 @@ export class Panel {
       const form = el("form", { class: "reply-form" }, [textarea, send]);
       form.addEventListener("submit", (event) => {
         event.preventDefault();
-        this.sendReply(detail);
+        this.sendReply();
       });
       children.push(form);
     }
@@ -1263,8 +1265,9 @@ export class Panel {
           el("button", {
             type: "button",
             class: "button button-ghost button-small comment-retry",
+            disabled: this.busy,
             text: failed ? t("panel.retry") : t("panel.retryAnyway"),
-            onClick: () => this.retryReply(detail, comment)
+            onClick: () => this.retryReply(comment)
           })
         );
       }
