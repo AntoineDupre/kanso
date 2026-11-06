@@ -69,9 +69,13 @@ function claimChip(card) {
 function renderCard(card, project, { selectedRef, onSelect, onMoveMenu }) {
   const icons = el("div", { class: "card-icons" });
   if (card.blocked || card.status === "blocker") {
-    const title = card.blocked_from
+    const fallback = card.blocked_from
       ? t("card.inBlocker", { status: t(`status.${card.blocked_from}`) })
       : t("card.blocked");
+    const title =
+      card.status === "blocker" && card.blocked_reason
+        ? card.blocked_reason
+        : fallback;
     icons.append(el("span", { class: "card-flag flag-lock", title, "aria-label": title }, [icon("lock", { size: 13 })]));
   }
   if (card.attention) {
@@ -118,6 +122,13 @@ function renderCard(card, project, { selectedRef, onSelect, onMoveMenu }) {
         icons
       ]),
       el("div", { class: "card-title", text: card.title }),
+      card.status === "blocker" && card.blocked_reason
+        ? el("div", {
+            class: "card-blocked-reason",
+            text: card.blocked_reason,
+            title: card.blocked_reason
+          })
+        : null,
       (card.labels || []).length ? labels : null,
       meta
     ]

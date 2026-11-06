@@ -29,6 +29,17 @@ function statusLabel(status) {
   return t(`status.${status}`);
 }
 
+function latestReply(comments) {
+  const replies = (comments || []).filter((comment) => comment.delivery_status);
+  return replies.length ? replies[replies.length - 1] : null;
+}
+
+function replyToast(status) {
+  if (status === "sent") return t("toast.replySent");
+  if (status === "unknown") return t("toast.replyUnknown");
+  return t("toast.replyFailed");
+}
+
 function selectInput(options, value, attributes = {}) {
   const node = el("select", { class: "input input-compact", ...attributes });
   for (const option of options) {
@@ -386,6 +397,65 @@ export class Panel {
     }
   }
 
+  async sendReply(detail) {
+    const textarea = this.root.querySelector('textarea[data-draft="reply"]');
+    if (!textarea || this.busy) return;
+    const body = textarea.value.trim();
+    if (!body) {
+      toast(t("panel.replyEmpty"), "warning");
+      return;
+    }
+    const reference = this.reference;
+    let created = false;
+    this.busy = true;
+    try {
+      const result = await api.replyTask(reference, body);
+      created = true;
+      if (this.reference !== reference) return;
+      this.clearDraft("reply");
+      const updated = await api.task(reference);
+      if (this.reference !== reference) return;
+      this.busy = false;
+      const status = result.delivery ? result.delivery.status : null;
+      this.applyDetail(updated);
+      toast(replyToast(status), status === "sent" ? "success" : "warning");
+    } catch (error) {
+      this.busy = false;
+      if (this.reference !== reference) return;
+      if (created) {
+        toast(t("toast.refreshFailed"), "warning");
+        this.render();
+      } else {
+        toastForError(error, t);
+        this.render();
+      }
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  async retryReply(detail, comment) {
+    const reference = this.reference;
+    this.busy = true;
+    try {
+      const result = await api.retryReply(reference, comment.id);
+      if (this.reference !== reference) return;
+      const updated = await api.task(reference);
+      if (this.reference !== reference) return;
+      this.busy = false;
+      const status = result.delivery ? result.delivery.status : null;
+      this.applyDetail(updated);
+      toast(replyToast(status), status === "sent" ? "success" : "warning");
+    } catch (error) {
+      this.busy = false;
+      if (this.reference !== reference) return;
+      toastForError(error, t);
+      this.render();
+    } finally {
+      this.busy = false;
+    }
+  }
+
   renderLoading() {
     const scrollTop = this.scrollEl ? this.scrollEl.scrollTop : 0;
     this.root.replaceChildren();
@@ -546,6 +616,7 @@ export class Panel {
     const detail = this.detail;
     const body = el("div", { class: "panel-body" }, [
       this.renderSummary(detail),
+      this.renderAgentQuestion(detail),
       this.renderDescription(detail, descriptionDraft),
       this.renderChecklist(detail, itemDraft),
       this.renderComments(detail),
@@ -692,6 +763,117 @@ export class Panel {
       this.renderLabels(detail),
       claim
     ]);
+  }
+
+  renderAgentQuestion(detail) {
+    if (detail.state !== "active" || detail.status !== "blocker") return null;
+
+    const question = el("div", { class: "markdown agent-question-reason" });
+    if (detail.blocked_reason) {
+      renderMarkdown(question, detail.blocked_reason);
+    } else {
+      question.append(
+        el("p", { class: "muted", text: t("panel.agentQuestionEmpty") })
+      );
+    }
+
+    const children = [
+      question,
+      el("p", {
+        class: "muted agent-question-session",
+        text: t("panel.sessionStatus", {
+          status: detail.session_status || t("common.none")
+        })
+      })
+    ];
+
+    const integrationEnabled = Boolean(this.integration && this.integration.enabled);
+    const hasSession = Boolean(detail.session_id);
+
+    const lastReply = latestReply(detail.comments);
+    if (lastReply && lastReply.delivery_status === "sent") {
+      children.push(
+        el("p", {
+          class: "muted agent-question-last",
+          text: t("panel.replySentAt", {
+            when: relativeTime(lastReply.created_at, t)
+          })
+        })
+      );
+    } else if (lastReply) {
+      const failed = lastReply.delivery_status === "failed";
+      const error = lastReply.delivery_error || t("common.error");
+      children.push(
+        el(
+          "div",
+          {
+            class: `reply-banner ${failed ? "reply-banner-failed" : "reply-banner-unknown"}`,
+            role: "status"
+          },
+          [
+            el("p", {
+              class: "reply-banner-text",
+              text: failed
+                ? t("panel.replyFailedBanner", { error })
+                : t("panel.replyUnknownBanner", { error })
+            }),
+            el("button", {
+              type: "button",
+              class: "button button-secondary button-small",
+              text: failed ? t("panel.retry") : t("panel.retryAnyway"),
+              onClick: () => this.retryReply(detail, lastReply)
+            })
+          ]
+        )
+      );
+    }
+
+    if (!hasSession) {
+      children.push(
+        el("p", { class: "agent-question-hint", text: t("panel.replyNoSession") })
+      );
+    } else if (!integrationEnabled) {
+      children.push(
+        el("p", {
+          class: "agent-question-hint",
+          text: t("panel.replyIntegrationDisabled")
+        })
+      );
+    } else {
+      // A busy session is fine: the prompt queues. A failed or offline session
+      // may still be resumed, so warn instead of blocking the human.
+      if (["failed", "offline"].includes(detail.session_status)) {
+        children.push(
+          el("p", {
+            class: "agent-question-warning",
+            text: t("panel.replySessionWarning", {
+              status: detail.session_status
+            })
+          })
+        );
+      }
+      const textarea = el("textarea", {
+        class: "input textarea",
+        rows: "3",
+        "data-draft": "reply",
+        placeholder: t("panel.replyPlaceholder"),
+        "aria-label": t("panel.replyPlaceholder")
+      });
+      const send = el("button", {
+        type: "submit",
+        class: "button button-primary button-small",
+        disabled: this.busy,
+        text: t("panel.sendReply")
+      });
+      const form = el("form", { class: "reply-form" }, [textarea, send]);
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        this.sendReply(detail);
+      });
+      children.push(form);
+    }
+
+    return this.section(t("panel.agentQuestion"), children, []);
   }
 
   renderLabels(detail) {
@@ -1059,13 +1241,37 @@ export class Panel {
     for (const comment of comments) {
       const body = el("div", { class: "markdown comment-body" });
       renderMarkdown(body, comment.body);
+      const byline = [
+        el("span", {
+          class: "comment-author",
+          text: comment.author === "ui" ? t("activity.you") : comment.author
+        })
+      ];
+      if (
+        comment.delivery_status === "failed" ||
+        comment.delivery_status === "unknown"
+      ) {
+        const failed = comment.delivery_status === "failed";
+        byline.push(
+          el("span", {
+            class: `badge ${failed ? "badge-warning" : "badge-info"} comment-delivery`,
+            title: comment.delivery_error || "",
+            text: failed
+              ? t("panel.deliveryFailed")
+              : t("panel.deliveryUnknown")
+          }),
+          el("button", {
+            type: "button",
+            class: "button button-ghost button-small comment-retry",
+            text: failed ? t("panel.retry") : t("panel.retryAnyway"),
+            onClick: () => this.retryReply(detail, comment)
+          })
+        );
+      }
       list.append(
         el("article", { class: "comment" }, [
           el("header", { class: "comment-header" }, [
-            el("span", {
-              class: "comment-author",
-              text: comment.author === "ui" ? t("activity.you") : comment.author
-            }),
+            el("span", { class: "comment-byline" }, byline),
             el("time", {
               class: "muted",
               datetime: new Date(comment.created_at).toISOString(),

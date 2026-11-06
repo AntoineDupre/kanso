@@ -156,6 +156,12 @@ export const api = {
   comment: (reference, body) =>
     request(`/api/tasks/${enc(reference)}/comment`, { method: "POST", body: { body } }),
 
+  replyTask: (reference, body) =>
+    request(`/api/tasks/${enc(reference)}/reply`, { method: "POST", body: { body } }),
+
+  retryReply: (reference, commentId) =>
+    request(`/api/tasks/${enc(reference)}/reply/${enc(commentId)}`, { method: "POST" }),
+
   addChecklist: (reference, text) =>
     request(`/api/tasks/${enc(reference)}/checklist`, { method: "POST", body: { text } }),
 

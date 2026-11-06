@@ -552,6 +552,16 @@ a {
   overflow-wrap: anywhere;
 }
 
+.card-blocked-reason {
+  margin: -3px 0 7px;
+  overflow: hidden;
+  color: var(--warning);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .card-labels {
   display: flex;
   flex-wrap: wrap;
@@ -1120,6 +1130,85 @@ body.resizing-panel * {
 
 .inline-form .input {
   flex: 1;
+}
+
+.agent-question-reason {
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 38%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning) 9%, transparent);
+}
+
+.agent-question-session,
+.agent-question-last {
+  margin: 8px 0 0;
+  font-size: 0.8rem;
+}
+
+.agent-question-hint {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.agent-question-warning {
+  margin: 8px 0 0;
+  color: var(--warning);
+  font-size: 0.82rem;
+}
+
+.reply-banner {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.82rem;
+}
+
+.reply-banner p {
+  margin: 0;
+}
+
+.reply-banner-failed {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: var(--danger-soft);
+}
+
+.reply-banner-unknown {
+  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+
+.reply-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.reply-form .textarea {
+  width: 100%;
+}
+
+.comment-byline {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.comment-delivery {
+  font-size: 0.7rem;
+}
+
+.comment-retry {
+  padding: 0 4px;
+  font-size: 0.72rem;
 }
 
 .comments {

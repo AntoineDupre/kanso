@@ -49,6 +49,7 @@ const EVENT_TYPES = [
   "project.updated",
   "project.archived",
   "comment.created",
+  "comment.updated",
   "checklist.created",
   "checklist.updated",
   "checklist.deleted",
@@ -2061,6 +2062,7 @@ function boardCardFromTask(task, previous) {
     attention: task.attention,
     session_status: task.session_status,
     blocked_from: task.blocked_from,
+    blocked_reason: task.blocked_reason,
     checklist_done: previous ? previous.checklist_done : 0,
     checklist_total: previous ? previous.checklist_total : 0,
     blocked: previous ? previous.blocked : false
@@ -2165,7 +2167,11 @@ function applyEvent(type, data) {
       upsertTask(task);
     }
 
-    if (task.attention || task.status === "in_review") {
+    if (
+      task.attention ||
+      task.status === "in_review" ||
+      (task.status === "blocker" && (task.blocked_reason || task.session_id))
+    ) {
       notifyTask(task, oldState);
     }
     if (task) state.previousCards.set(task.id, { attention: task.attention, status: task.status });
@@ -2287,10 +2293,35 @@ function applyEvent(type, data) {
   }
 }
 
+function truncateText(value, limit) {
+  const text = String(value || "").trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - 1).trimEnd()}…`;
+}
+
 function notifyTask(task, previous) {
   if (!state.notificationsEnabled) return;
   if (document.visibilityState !== "hidden") return;
   if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const enteredBlocker =
+    task.status === "blocker" &&
+    !(previous && previous.status === "blocker") &&
+    Boolean(task.blocked_reason || task.session_id);
+  if (enteredBlocker) {
+    const body = truncateText(
+      task.blocked_reason || t("notification.blockerBody"),
+      120
+    );
+    try {
+      new Notification(t("notification.taskBlocked", { ref: task.reference }), {
+        body,
+        tag: `kanso-${task.id}`
+      });
+    } catch {
+      // Browsers may reject notifications in some contexts.
+    }
+    return;
+  }
   const gainedAttention = task.attention && !(previous && previous.attention);
   const enteredReview = task.status === "in_review" && !(previous && previous.status === "in_review");
   if (!gainedAttention && !enteredReview) return;
