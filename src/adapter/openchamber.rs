@@ -18,6 +18,8 @@ pub const VERSION_CACHE_TTL: Duration = Duration::from_secs(5);
 pub const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 pub const AUTO_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const LIST_TIMEOUT: Duration = Duration::from_secs(30);
+/// A human reply is fire-and-forget upstream; it never waits for the agent.
+pub const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Worktree provisioning can take about two minutes, so dispatch waits above
 /// that before giving up.
 pub const DISPATCH_TIMEOUT: Duration = Duration::from_secs(150);
@@ -41,6 +43,7 @@ Rules:
 - Report progress with the CLI: `kanso comment {{ref}} \"…\"`.
 - When finished, run `kanso move {{ref}} in_review` and comment a summary.
 - If blocked, run `kanso move {{ref}} blocker --reason \"…\"`.
+- If the card is in blocker, the human's answer arrives as a new message in this session. Continue and move the card out of blocker when you are unblocked; do not poll.
 - Never set the card to done, never delete it, never touch other cards.";
 
 /// One failure from OpenChamber, classified so the API can answer 502 for an
@@ -227,6 +230,110 @@ impl OpenChamber {
         .await
         .map_err(|error| OpenChamberError::Transport(error.to_string()))?
     }
+
+    /// Forward one human reply into an existing session without waiting for the
+    /// agent. Failure is classified so the caller can record delivery.
+    pub async fn send_prompt(
+        &self,
+        session_id: &str,
+        directory: &str,
+        prompt: &str,
+        timeout: Duration,
+    ) -> PromptDelivery {
+        let base = self.base.to_string();
+        let token = self.token.to_string();
+        let payload = build_session_send(session_id, directory, prompt);
+        let result =
+            tokio::task::spawn_blocking(move || post_control(&base, &token, &payload, timeout))
+                .await
+                .unwrap_or_else(|error| Err(OpenChamberError::Transport(error.to_string())));
+
+        match result {
+            Ok(value) => parse_prompt_dispatch(&value),
+            Err(OpenChamberError::Http { status, message }) => PromptDelivery::Failed(
+                truncate_error(format!("OpenChamber returned HTTP {status}: {message}")),
+            ),
+            Err(error) => PromptDelivery::Unknown(truncate_error(error.to_string())),
+        }
+    }
+}
+
+/// The outcome of forwarding a reply. `Unknown` means the prompt may have been
+/// delivered even though Kanso could not confirm it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PromptDelivery {
+    Sent,
+    Failed(String),
+    Unknown(String),
+}
+
+/// Build the exact `session.send` payload for one reply.
+pub fn build_session_send(session_id: &str, directory: &str, prompt: &str) -> Value {
+    json!({
+        "action": "session.send",
+        "input": {
+            "sessionId": session_id,
+            "directory": directory,
+            "prompt": prompt,
+            "wait": false,
+        },
+    })
+}
+
+/// Classify a 2xx `session.send` body.
+pub fn parse_prompt_dispatch(value: &Value) -> PromptDelivery {
+    // Some OpenChamber versions wrap the result in `data`; accept both shapes.
+    let result = match value.get("data") {
+        Some(data) if data.get("promptDispatched").is_some() => data,
+        _ => value,
+    };
+    match result.get("promptDispatched").and_then(Value::as_bool) {
+        Some(true) => PromptDelivery::Sent,
+        Some(false) => {
+            let message = string_field(result, &["promptError"])
+                .unwrap_or_else(|| "OpenChamber did not dispatch the prompt".to_owned());
+            PromptDelivery::Failed(truncate_error(message))
+        }
+        None => PromptDelivery::Unknown(truncate_error(
+            "session.send returned no promptDispatched field",
+        )),
+    }
+}
+
+fn truncate_error(message: impl Into<String>) -> String {
+    message.into().chars().take(500).collect()
+}
+
+/// The wrapper stored verbatim in `reply_prompt` so a retry is byte-identical.
+///
+/// The leading comment id lets the agent ignore a duplicate after an `unknown`
+/// delivery was retried.
+pub fn build_reply_prompt(
+    reference: &str,
+    title: &str,
+    comment_id: &str,
+    blocked_reason: Option<&str>,
+    reply: &str,
+) -> String {
+    let mut prompt = format!("Human reply on {reference} — {title} (reply {comment_id}):");
+    let reason = blocked_reason
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty());
+    if let Some(reason) = reason {
+        prompt.push('\n');
+        for line in reason.split('\n') {
+            prompt.push_str("> ");
+            prompt.push_str(line.trim_end_matches('\r'));
+            prompt.push('\n');
+        }
+        prompt.push('\n');
+    } else {
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str(reply);
+    prompt
+        .push_str("\n\nContinue the work and move the card out of blocker when you are unblocked.");
+    prompt
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1177,5 +1284,80 @@ mod tests {
             }]
         });
         assert!(!parse_session_list(&value)[0].has_assistant_message);
+    }
+
+    #[test]
+    fn session_send_payload_matches_the_control_contract() {
+        assert_eq!(
+            build_session_send("ses_abc", "/tmp/kanso-session", "hello"),
+            json!({
+                "action": "session.send",
+                "input": {
+                    "sessionId": "ses_abc",
+                    "directory": "/tmp/kanso-session",
+                    "prompt": "hello",
+                    "wait": false
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn prompt_dispatch_classifies_the_upstream_answer() {
+        assert_eq!(
+            parse_prompt_dispatch(&json!({ "promptDispatched": true })),
+            PromptDelivery::Sent
+        );
+        assert_eq!(
+            parse_prompt_dispatch(&json!({
+                "promptDispatched": false,
+                "promptError": "session is not accepting prompts"
+            })),
+            PromptDelivery::Failed("session is not accepting prompts".to_owned())
+        );
+        assert_eq!(
+            parse_prompt_dispatch(&json!({ "data": { "promptDispatched": true } })),
+            PromptDelivery::Sent
+        );
+        assert_eq!(
+            parse_prompt_dispatch(&json!({ "ok": true })),
+            PromptDelivery::Unknown("session.send returned no promptDispatched field".to_owned())
+        );
+        let long = "x".repeat(700);
+        let PromptDelivery::Failed(message) =
+            parse_prompt_dispatch(&json!({ "promptDispatched": false, "promptError": long }))
+        else {
+            panic!("expected failed delivery");
+        };
+        assert_eq!(message.chars().count(), 500);
+    }
+
+    #[test]
+    fn reply_prompt_wraps_the_question_without_a_reason() {
+        assert_eq!(
+            build_reply_prompt("ALP-42", "Fix it", "c1", None, "Go ahead."),
+            "Human reply on ALP-42 — Fix it (reply c1):\n\nGo ahead.\n\nContinue the work and move the card out of blocker when you are unblocked."
+        );
+        assert_eq!(
+            build_reply_prompt("ALP-42", "Fix it", "c1", Some("   "), "Go ahead."),
+            "Human reply on ALP-42 — Fix it (reply c1):\n\nGo ahead.\n\nContinue the work and move the card out of blocker when you are unblocked."
+        );
+    }
+
+    #[test]
+    fn reply_prompt_quotes_every_reason_line() {
+        let prompt = build_reply_prompt(
+            "ALP-42",
+            "Fix it",
+            "c1",
+            Some("Which branch?\nmain or develop?"),
+            "main",
+        );
+        assert_eq!(
+            prompt,
+            "Human reply on ALP-42 — Fix it (reply c1):\n> Which branch?\n> main or develop?\n\nmain\n\nContinue the work and move the card out of blocker when you are unblocked."
+        );
+        assert!(prompt.contains("(reply c1)"));
+        assert!(prompt.contains("move the card out of blocker"));
     }
 }
