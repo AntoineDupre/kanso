@@ -35,6 +35,7 @@ mod integration;
 mod labels;
 pub(crate) mod model;
 mod projects;
+mod reply;
 mod session;
 pub(crate) mod tasks;
 mod tokens;
@@ -408,6 +409,11 @@ pub fn routes() -> Router<AppState> {
         .route("/api/board", get(board::global))
         .route("/api/projects/{id}/board", get(board::project_board))
         .route("/api/tasks/{reference}/comment", post(comments::create))
+        .route("/api/tasks/{reference}/reply", post(reply::create))
+        .route(
+            "/api/tasks/{reference}/reply/{comment_id}",
+            post(reply::retry),
+        )
         .route("/api/tasks/{reference}/checklist", post(checklist::create))
         .route(
             "/api/tasks/{reference}/checklist/{item}",
