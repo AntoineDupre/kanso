@@ -1404,9 +1404,16 @@ export class Panel {
                 agent: (project.agent || "").trim() || "build",
                 model: (project.model || "").trim(),
                 onSubmit: async (selection) => {
-                  const updated = await api.dispatchTask(detail.reference, selection);
-                  if (this.reference === detail.reference) {
-                    this.applyDetail(updated, t("toast.dispatched"));
+                  try {
+                    const updated = await api.dispatchTask(detail.reference, selection);
+                    if (this.reference === detail.reference) {
+                      this.applyDetail(updated, t("toast.dispatched"));
+                    }
+                  } catch (error) {
+                    if (error.status === 404 && this.options.onNotFound) {
+                      this.options.onNotFound(detail.reference);
+                    }
+                    throw error;
                   }
                 }
               });

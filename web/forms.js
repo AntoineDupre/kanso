@@ -183,6 +183,7 @@ export function openDispatchDialog({ reference, agent = "", model = "", onSubmit
     event.preventDefault();
     error.hidden = true;
     setBusy(submit, true);
+    cancel.disabled = true;
     try {
       await onSubmit({
         agent: agentInput.value.trim(),
@@ -190,9 +191,19 @@ export function openDispatchDialog({ reference, agent = "", model = "", onSubmit
       });
       modal.close();
     } catch (failure) {
-      showError(error, failure.message || t("common.error"));
+      if (failure.status === 404) {
+        modal.close();
+        toastForError(failure, t);
+      } else if (form.isConnected) {
+        showError(error, failure.message || t("common.error"));
+      } else {
+        // The dialog was closed while the request was in flight; do not lose
+        // the failure on a detached form.
+        toastForError(failure, t);
+      }
     } finally {
       setBusy(submit, false);
+      cancel.disabled = false;
     }
   });
   return modal;
@@ -445,7 +456,8 @@ export function openProjectForm({ project = null, onSaved }) {
       name: name.value.trim(),
       description: description.value,
       color: color.value,
-      repo_path: repoPath.value.trim() || null
+      repo_path: repoPath.value.trim() || null,
+      model: model.value.trim() || null
     };
     if (!base.key || !base.name) {
       showError(error, t("form.requiredFields"));

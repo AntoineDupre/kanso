@@ -222,7 +222,10 @@ OpenChamber/OpenCode thinking level. Kanso splits the value and sends `model`
 and `variant` as separate fields, so the `#` never appears in the model id.
 Without `#`, no `variant` is sent. Empty or `null` means no project model; on
 dispatch, an empty override keeps the project value. An invalid model is
-`422 validation`.
+`422 validation`. A project row written before this validation and holding a
+value that is not `provider/model[#variant]` keeps working until it is used:
+dispatch and the next project save then reject it with the same `422` so it can
+be corrected.
 
 ### Tasks
 

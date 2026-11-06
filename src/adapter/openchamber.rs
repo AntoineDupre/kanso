@@ -665,9 +665,8 @@ pub fn parse_model(raw: &str) -> Result<Option<ModelSpec>, String> {
     let Some((provider, model)) = base.split_once('/') else {
         return Err("model must use provider/model[#variant]".to_owned());
     };
-    if model.contains('/') {
-        return Err("model must use exactly one '/' between provider and model".to_owned());
-    }
+    // Only the first slash separates the provider: model ids may contain
+    // further slashes (for example `openrouter/anthropic/claude-sonnet`).
     let provider = provider.trim();
     let model = model.trim();
     if provider.is_empty() {
@@ -955,6 +954,15 @@ mod tests {
                 variant: Some("max".to_owned()),
             }
         );
+        assert_eq!(
+            parse_model("openrouter/anthropic/claude-sonnet#high")
+                .expect("valid")
+                .expect("model"),
+            ModelSpec {
+                model: "openrouter/anthropic/claude-sonnet".to_owned(),
+                variant: Some("high".to_owned()),
+            }
+        );
         assert_eq!(parse_model("   ").expect("empty"), None);
         assert_eq!(parse_model("").expect("empty"), None);
     }
@@ -967,7 +975,7 @@ mod tests {
             "provider/",
             "provider/model#",
             "provider/model#high#max",
-            "provider/model/extra",
+            "provider/#high",
             "provider/model#   ",
         ] {
             assert!(parse_model(invalid).is_err(), "{invalid:?}");

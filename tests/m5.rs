@@ -13,6 +13,7 @@ use std::time::Duration;
 use axum::body::{to_bytes, Body};
 use axum::extract::connect_info::MockConnectInfo;
 use axum::extract::State;
+use axum::http::request::Builder;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -349,6 +350,30 @@ impl TestApp {
         }
     }
 
+    async fn send(&self, builder: Builder, body: Body) -> ApiResponse {
+        let response = self
+            .app
+            .clone()
+            .oneshot(builder.body(body).expect("build request"))
+            .await
+            .expect("call router");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        ApiResponse {
+            status,
+            headers,
+            body,
+        }
+    }
+
     async fn request(
         &self,
         method: Method,
@@ -374,27 +399,28 @@ impl TestApp {
             }
             None => Body::empty(),
         };
-        let response = self
-            .app
-            .clone()
-            .oneshot(builder.body(body).expect("build request"))
-            .await
-            .expect("call router");
-        let status = response.status();
-        let headers = response.headers().clone();
-        let bytes = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read body");
-        let body = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-        };
-        ApiResponse {
-            status,
-            headers,
-            body,
+        self.send(builder, body).await
+    }
+
+    /// A POST with a raw body and an explicit (or absent) content type, for
+    /// exercising the optional-body extractor.
+    async fn post_raw(
+        &self,
+        uri: &str,
+        body: &str,
+        content_type: Option<&str>,
+        cookie: &str,
+    ) -> ApiResponse {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(header::HOST, "kanso.example")
+            .header(header::COOKIE, format!("kanso_session={cookie}"))
+            .header(header::ORIGIN, ORIGIN);
+        if let Some(content_type) = content_type {
+            builder = builder.header(header::CONTENT_TYPE, content_type);
         }
+        self.send(builder, Body::from(body.to_owned())).await
     }
 
     async fn login(&self) -> String {
@@ -1338,6 +1364,109 @@ async fn dispatch_rejects_unknown_body_fields() {
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
     assert_eq!(response.code(), "validation");
     assert!(mock.create_requests().is_empty());
+}
+
+#[tokio::test]
+async fn dispatch_accepts_a_bodyless_request_with_a_json_content_type() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "ALP", "Alpha").await;
+    let project_id = project["id"].as_str().expect("id");
+    app.patch(
+        &format!("/api/projects/{project_id}"),
+        json!({
+            "repo_path": "/home/me/code/alpha",
+            "agent": "plan",
+            "model": "openai/gpt-5#max",
+        }),
+        &cookie,
+    )
+    .await;
+    let card = app.create_card(&cookie, project_id, "Do it").await;
+    let reference = card["reference"].as_str().expect("ref");
+
+    let response = app
+        .post_raw(
+            &format!("/api/tasks/{reference}/dispatch"),
+            "",
+            Some("application/json"),
+            &cookie,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+
+    let creates = mock.create_requests();
+    assert_eq!(creates.len(), 1);
+    let input = &creates[0].body["input"];
+    assert_eq!(input["agent"], "plan");
+    assert_eq!(input["model"], "openai/gpt-5");
+    assert_eq!(input["variant"], "max");
+}
+
+#[tokio::test]
+async fn dispatch_rejects_a_non_empty_body_without_a_json_content_type() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "ALP", "Alpha").await;
+    let project_id = project["id"].as_str().expect("id");
+    app.patch(
+        &format!("/api/projects/{project_id}"),
+        json!({ "repo_path": "/home/me/code/alpha" }),
+        &cookie,
+    )
+    .await;
+    let card = app.create_card(&cookie, project_id, "Do it").await;
+    let reference = card["reference"].as_str().expect("ref");
+    let uri = format!("/api/tasks/{reference}/dispatch");
+
+    for content_type in [None, Some("text/plain")] {
+        let response = app
+            .post_raw(&uri, r#"{"agent":"review"}"#, content_type, &cookie)
+            .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "{content_type:?}: {:?}",
+            response.body
+        );
+        assert_eq!(response.code(), "validation");
+    }
+    assert!(mock.create_requests().is_empty());
+}
+
+#[tokio::test]
+async fn dispatch_accepts_an_openrouter_model_with_nested_slashes() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "ALP", "Alpha").await;
+    let project_id = project["id"].as_str().expect("id");
+    let patched = app
+        .patch(
+            &format!("/api/projects/{project_id}"),
+            json!({
+                "repo_path": "/home/me/code/alpha",
+                "model": "openrouter/anthropic/claude-sonnet#high",
+            }),
+            &cookie,
+        )
+        .await;
+    assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
+    let card = app.create_card(&cookie, project_id, "Do it").await;
+    let reference = card["reference"].as_str().expect("ref");
+
+    let response = app
+        .post(&format!("/api/tasks/{reference}/dispatch"), None, &cookie)
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+
+    let creates = mock.create_requests();
+    assert_eq!(creates.len(), 1);
+    let input = &creates[0].body["input"];
+    assert_eq!(input["model"], "openrouter/anthropic/claude-sonnet");
+    assert_eq!(input["variant"], "high");
 }
 
 #[tokio::test]

@@ -2,11 +2,10 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{
-    ConnectInfo, FromRequest, FromRequestParts, OptionalFromRequest, Query, Request,
-};
+use axum::body::Bytes;
+use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Query, Request};
 use axum::http::request::Parts;
-use axum::http::{header, HeaderValue};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -293,8 +292,9 @@ where
     }
 }
 
-/// Optional JSON body: no `Content-Type` means `None`, while malformed JSON
-/// still produces the API error envelope through [`ApiJson`].
+/// Optional JSON body: an empty body is `None` whatever the content type,
+/// while a non-empty body must be JSON and uses the same error envelope as
+/// [`ApiJson`].
 pub struct OptionalApiJson<T>(pub Option<T>);
 
 impl<T, S> FromRequest<S> for OptionalApiJson<T>
@@ -305,14 +305,44 @@ where
     type Rejection = ApiError;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        match <Json<T> as OptionalFromRequest<S>>::from_request(request, state).await {
-            Ok(Some(Json(value))) => Ok(Self(Some(value))),
-            Ok(None) => Ok(Self(None)),
-            Err(rejection) => Err(ApiError::rejection(
-                rejection.status(),
-                format!("invalid JSON body: {}", rejection.body_text()),
-            )),
+        let is_json = request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| {
+                let mime = value
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                mime == "application/json" || mime.ends_with("+json")
+            })
+            .unwrap_or(false);
+        let bytes = Bytes::from_request(request, state)
+            .await
+            .map_err(|rejection| {
+                ApiError::rejection(
+                    rejection.status(),
+                    format!("could not read the request body: {}", rejection.body_text()),
+                )
+            })?;
+        if bytes.is_empty() {
+            return Ok(Self(None));
         }
+        if !is_json {
+            return Err(ApiError::rejection(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "expected a JSON request body",
+            ));
+        }
+        let value = serde_json::from_slice(&bytes).map_err(|error| {
+            ApiError::rejection(
+                StatusCode::BAD_REQUEST,
+                format!("invalid JSON body: {error}"),
+            )
+        })?;
+        Ok(Self(Some(value)))
     }
 }
 

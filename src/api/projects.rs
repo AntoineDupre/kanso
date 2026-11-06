@@ -93,9 +93,17 @@ fn validate_model(raw: &str) -> Result<Option<String>, ApiError> {
     if model.is_empty() {
         return Ok(None);
     }
-    parse_model(model)
-        .map_err(|error| ApiError::unprocessable(format!("invalid model: {error}")))?;
-    Ok(Some(model.to_owned()))
+    let Some(spec) = parse_model(model)
+        .map_err(|error| ApiError::unprocessable(format!("invalid model: {error}")))?
+    else {
+        return Ok(None);
+    };
+    let mut normalized = spec.model;
+    if let Some(variant) = spec.variant {
+        normalized.push('#');
+        normalized.push_str(&variant);
+    }
+    Ok(Some(normalized))
 }
 
 pub(super) fn project_by_ref(
