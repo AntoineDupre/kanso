@@ -272,10 +272,11 @@ Setup: OpenChamber is enabled, the card has a linked session (dispatch or
 
 ### Failed delivery and retry
 
-1. Stop OpenChamber (or make `session.send` answer HTTP 500). Send a reply.
-   The reply is recorded, a toast says delivery failed, and the panel shows the
-   error with **Retry**; the comment carries a **Not delivered** badge whose
-   tooltip is the upstream error.
+1. Make `session.send` answer HTTP 500 (or 2xx with `promptDispatched:false`).
+   Send a reply. The reply is recorded, a toast says delivery failed, and the
+   panel shows the error with **Retry**; the comment carries a **Not delivered**
+   badge whose tooltip is the upstream error. (Stopping OpenChamber entirely is a
+   transport error and belongs to the unknown case below.)
 2. Restart OpenChamber and press **Retry** in the panel or on the comment. The
    reply becomes **sent**, the badge disappears, and the card's status is only
    `running`/`attention=0`; the column did not change. A retry after a
