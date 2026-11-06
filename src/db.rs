@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 pub const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v1.sql"),
     include_str!("migrations/v2.sql"),
+    include_str!("migrations/v3.sql"),
 ];
 
 /// Open the database and apply the connection-level pragmas.
@@ -174,7 +175,7 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("read user_version");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
 
         let mut statement = connection
             .prepare(
@@ -235,13 +236,13 @@ mod tests {
         let path = dir.path().join("kanso.db");
         let mut connection = open(&path).expect("open database");
 
-        assert_eq!(migrate(&mut connection).expect("first migration"), 2);
-        assert_eq!(migrate(&mut connection).expect("second migration"), 2);
+        assert_eq!(migrate(&mut connection).expect("first migration"), 3);
+        assert_eq!(migrate(&mut connection).expect("second migration"), 3);
 
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("read user_version");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -266,7 +267,7 @@ mod tests {
             )
             .expect("seed v1 rows");
 
-        assert_eq!(migrate(&mut connection).expect("migrate to v2"), 2);
+        assert_eq!(migrate(&mut connection).expect("migrate to v3"), 3);
 
         let mut statement = connection
             .prepare("PRAGMA index_info('checklist_task')")
@@ -296,6 +297,58 @@ mod tests {
             )
             .expect("read seeded checklist row");
         assert_eq!(row, ("c1".to_owned(), "t1".to_owned(), 1));
+    }
+
+    #[test]
+    fn upgrade_from_v2_keeps_comments_and_adds_the_reply_delivery_columns() {
+        let dir = TempDir::new();
+        let path = dir.path().join("kanso.db");
+        let mut connection = open(&path).expect("open database");
+        assert_eq!(
+            apply(&mut connection, &MIGRATIONS[..2]).expect("migrate to v2"),
+            2
+        );
+
+        connection
+            .execute_batch(
+                "INSERT INTO projects (id, key, name, position, created_at, updated_at)
+                   VALUES ('p1', 'ALP', 'Alpha', 1.0, 1, 1);
+                 INSERT INTO tasks
+                   (id, project_id, number, title, status, rank, created_at, updated_at)
+                   VALUES ('t1', 'p1', 1, 'First', 'blocker', 1.0, 1, 1);
+                 INSERT INTO comments (id, task_id, author, body, created_at)
+                   VALUES ('c1', 't1', 'ui', 'existing', 1);",
+            )
+            .expect("seed v2 rows");
+
+        assert_eq!(migrate(&mut connection).expect("migrate to v3"), 3);
+
+        let mut statement = connection
+            .prepare("PRAGMA table_info('comments')")
+            .expect("prepare table info");
+        let columns: Vec<String> = statement
+            .query_map([], |row| row.get(1))
+            .expect("query table info")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect table info");
+        for expected in [
+            "delivery_status",
+            "delivery_error",
+            "delivery_session_id",
+            "delivery_session_directory",
+            "reply_prompt",
+        ] {
+            assert!(columns.iter().any(|name| name == expected), "{expected}");
+        }
+
+        let row: (String, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT body, delivery_status, reply_prompt FROM comments WHERE id = 'c1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read seeded comment");
+        assert_eq!(row, ("existing".to_owned(), None, None));
     }
 
     #[test]

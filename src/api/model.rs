@@ -69,6 +69,23 @@ pub struct Comment {
     pub author: String,
     pub body: String,
     pub created_at: i64,
+    pub delivery_status: Option<String>,
+    pub delivery_error: Option<String>,
+}
+
+pub const COMMENT_COLUMNS: &str = "id, author, body, created_at, delivery_status, delivery_error";
+
+impl Comment {
+    pub fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            author: row.get(1)?,
+            body: row.get(2)?,
+            created_at: row.get(3)?,
+            delivery_status: row.get(4)?,
+            delivery_error: row.get(5)?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -188,6 +205,8 @@ pub struct BoardCard {
     pub attention: bool,
     pub session_status: Option<String>,
     pub blocked_from: Option<String>,
+    /// The agent's question shown on a blocker card.
+    pub blocked_reason: Option<String>,
     /// Checklist progress so cards can show `2/3` without opening each card.
     pub checklist_done: i64,
     pub checklist_total: i64,
@@ -214,6 +233,7 @@ impl BoardCard {
             attention: task.attention,
             session_status: task.session_status.clone(),
             blocked_from: task.blocked_from.clone(),
+            blocked_reason: task.blocked_reason.clone(),
             checklist_done,
             checklist_total,
             blocked,

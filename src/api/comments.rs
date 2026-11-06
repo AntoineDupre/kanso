@@ -2,11 +2,11 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::model::Comment;
+use super::model::{Comment, COMMENT_COLUMNS};
 use super::tasks::{insert_activity, task_by_ref};
 use super::{now_millis, ApiError, ApiJson, Auth};
 use crate::ids;
@@ -20,7 +20,7 @@ pub struct CreateComment {
     body: String,
 }
 
-fn validate_body(raw: &str) -> Result<String, ApiError> {
+pub(super) fn validate_body(raw: &str) -> Result<String, ApiError> {
     if raw.trim().is_empty() {
         return Err(ApiError::validation("comment body must not be empty"));
     }
@@ -28,6 +28,20 @@ fn validate_body(raw: &str) -> Result<String, ApiError> {
         return Err(ApiError::validation("comment body must be at most 16 KiB"));
     }
     Ok(raw.to_owned())
+}
+
+pub(super) fn by_id(
+    connection: &rusqlite::Connection,
+    comment_id: &str,
+) -> crate::error::Result<Option<Comment>> {
+    connection
+        .query_row(
+            &format!("SELECT {COMMENT_COLUMNS} FROM comments WHERE id = ?1"),
+            [comment_id],
+            Comment::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
 }
 
 pub async fn create(
@@ -68,6 +82,8 @@ pub async fn create(
                     author,
                     body,
                     created_at: now,
+                    delivery_status: None,
+                    delivery_error: None,
                 },
             )))
         })

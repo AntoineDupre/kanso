@@ -93,7 +93,8 @@ fn load_export(connection: &mut rusqlite::Connection) -> crate::error::Result<Ex
 
     let comments = {
         let mut statement = connection.prepare(
-            "SELECT c.id, c.author, c.body, c.created_at, c.task_id, p.key, t.number
+            "SELECT c.id, c.author, c.body, c.created_at, c.delivery_status, c.delivery_error,
+                    c.task_id, p.key, t.number
              FROM comments c
              JOIN tasks t ON t.id = c.task_id
              JOIN projects p ON p.id = t.project_id
@@ -101,17 +102,12 @@ fn load_export(connection: &mut rusqlite::Connection) -> crate::error::Result<Ex
         )?;
         let comments = statement
             .query_map([], |row| {
-                let key: String = row.get(5)?;
-                let number: i64 = row.get(6)?;
+                let key: String = row.get(7)?;
+                let number: i64 = row.get(8)?;
                 Ok(ExportComment {
-                    task_id: row.get(4)?,
+                    task_id: row.get(6)?,
                     task_reference: format!("{key}-{number}"),
-                    comment: Comment {
-                        id: row.get(0)?,
-                        author: row.get(1)?,
-                        body: row.get(2)?,
-                        created_at: row.get(3)?,
-                    },
+                    comment: Comment::from_row(row)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::model::{
     Activity, ChecklistItem, Comment, Dependencies, DependencyRef, Label, Task, TaskDetail,
-    TASK_COLUMNS,
+    COMMENT_COLUMNS, TASK_COLUMNS,
 };
 use super::{
     deserialize_present, now_millis, parse_flag, require_human, ApiError, ApiJson, ApiQuery, Auth,
@@ -330,19 +330,12 @@ fn load_comments(
     connection: &rusqlite::Connection,
     task_id: &str,
 ) -> crate::error::Result<Vec<Comment>> {
-    let mut statement = connection.prepare(
-        "SELECT id, author, body, created_at FROM comments
-         WHERE task_id = ?1 ORDER BY created_at, id",
-    )?;
+    let mut statement = connection.prepare(&format!(
+        "SELECT {COMMENT_COLUMNS} FROM comments
+         WHERE task_id = ?1 ORDER BY created_at, id"
+    ))?;
     let comments = statement
-        .query_map([task_id], |row| {
-            Ok(Comment {
-                id: row.get(0)?,
-                author: row.get(1)?,
-                body: row.get(2)?,
-                created_at: row.get(3)?,
-            })
-        })?
+        .query_map([task_id], Comment::from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(comments)
 }
@@ -1217,13 +1210,15 @@ pub async fn move_task(
             } else {
                 "moved"
             };
-            insert_activity(
-                &transaction,
-                &task.id,
-                &actor,
-                activity,
-                &json!({ "from": current, "to": target, "rank": rank }),
-            )?;
+            let reason_changed = target == "blocker"
+                && current == "blocker"
+                && reason.is_some()
+                && task.blocked_reason != blocked_reason;
+            let mut data = json!({ "from": current, "to": target, "rank": rank });
+            if activity == "blocked" || reason_changed {
+                data["reason"] = json!(blocked_reason);
+            }
+            insert_activity(&transaction, &task.id, &actor, activity, &data)?;
 
             let task = task_by_ref(&transaction, &task.id)?
                 .ok_or_else(|| crate::error::Error::msg("moved task missing"))?;
