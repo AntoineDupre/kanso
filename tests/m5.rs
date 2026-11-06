@@ -1070,6 +1070,277 @@ async fn dispatch_sends_the_exact_payload_stores_the_session_and_enables_auto_ac
 }
 
 #[tokio::test]
+async fn dispatch_body_overrides_agent_and_model_with_variant() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "ALP", "Alpha").await;
+    let project_id = project["id"].as_str().expect("id");
+    let patched = app
+        .patch(
+            &format!("/api/projects/{project_id}"),
+            json!({
+                "repo_path": "/home/me/code/alpha",
+                "agent": "plan",
+                "model": "openai/gpt-5#max",
+            }),
+            &cookie,
+        )
+        .await;
+    assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
+    let card = app.create_card(&cookie, project_id, "Do it").await;
+    let reference = card["reference"].as_str().expect("ref");
+
+    let response = app
+        .post(
+            &format!("/api/tasks/{reference}/dispatch"),
+            Some(json!({
+                "agent": "review",
+                "model": "anthropic/claude-sonnet#high",
+            })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+
+    let creates = mock.create_requests();
+    assert_eq!(creates.len(), 1);
+    let input = &creates[0].body["input"];
+    assert_eq!(input["agent"], "review");
+    assert_eq!(input["model"], "anthropic/claude-sonnet");
+    assert_eq!(input["variant"], "high");
+}
+
+#[tokio::test]
+async fn dispatch_without_a_body_inherits_and_splits_the_project_model() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "ALP", "Alpha").await;
+    let project_id = project["id"].as_str().expect("id");
+    app.patch(
+        &format!("/api/projects/{project_id}"),
+        json!({
+            "repo_path": "/home/me/code/alpha",
+            "agent": "plan",
+            "model": "opencode-go/deepseek-v4.1-flash#max",
+        }),
+        &cookie,
+    )
+    .await;
+    let card = app.create_card(&cookie, project_id, "Do it").await;
+    let reference = card["reference"].as_str().expect("ref");
+
+    let response = app
+        .post(&format!("/api/tasks/{reference}/dispatch"), None, &cookie)
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+
+    let creates = mock.create_requests();
+    assert_eq!(creates.len(), 1);
+    let input = &creates[0].body["input"];
+    assert_eq!(input["agent"], "plan");
+    assert_eq!(input["model"], "opencode-go/deepseek-v4.1-flash");
+    assert_eq!(input["variant"], "max");
+}
+
+#[tokio::test]
+async fn dispatch_empty_overrides_inherit_the_project_settings() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "ALP", "Alpha").await;
+    let project_id = project["id"].as_str().expect("id");
+    app.patch(
+        &format!("/api/projects/{project_id}"),
+        json!({
+            "repo_path": "/home/me/code/alpha",
+            "agent": "plan",
+            "model": "openai/gpt-5#max",
+        }),
+        &cookie,
+    )
+    .await;
+    let card = app.create_card(&cookie, project_id, "Do it").await;
+    let reference = card["reference"].as_str().expect("ref");
+
+    let response = app
+        .post(
+            &format!("/api/tasks/{reference}/dispatch"),
+            Some(json!({ "agent": "  ", "model": "" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+
+    let creates = mock.create_requests();
+    assert_eq!(creates.len(), 1);
+    let input = &creates[0].body["input"];
+    assert_eq!(input["agent"], "plan");
+    assert_eq!(input["model"], "openai/gpt-5");
+    assert_eq!(input["variant"], "max");
+}
+
+#[tokio::test]
+async fn dispatch_rejects_an_invalid_supplied_model() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "ALP", "Alpha").await;
+    let project_id = project["id"].as_str().expect("id");
+    app.patch(
+        &format!("/api/projects/{project_id}"),
+        json!({ "repo_path": "/home/me/code/alpha" }),
+        &cookie,
+    )
+    .await;
+    let card = app.create_card(&cookie, project_id, "Do it").await;
+    let reference = card["reference"].as_str().expect("ref");
+
+    let response = app
+        .post(
+            &format!("/api/tasks/{reference}/dispatch"),
+            Some(json!({ "model": "not-a-model" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.code(), "validation");
+    assert!(response.message().contains("invalid model"));
+    assert!(mock.create_requests().is_empty());
+
+    let detail = app.detail(&cookie, reference).await;
+    assert!(detail["session_id"].is_null());
+    assert!(detail["claimed_by"].is_null());
+}
+
+#[tokio::test]
+async fn dispatch_rejects_an_invalid_inherited_project_model() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "ALP", "Alpha").await;
+    let project_id = project["id"].as_str().expect("id").to_owned();
+    app.patch(
+        &format!("/api/projects/{project_id}"),
+        json!({ "repo_path": "/home/me/code/alpha" }),
+        &cookie,
+    )
+    .await;
+    let card = app.create_card(&cookie, &project_id, "Do it").await;
+    let reference = card["reference"].as_str().expect("ref");
+
+    // Simulate a row written before model validation existed.
+    let model_project_id = project_id.clone();
+    app.state
+        .db
+        .call(move |connection| {
+            connection.execute(
+                "UPDATE projects SET model = 'not-a-model' WHERE id = ?1",
+                [&model_project_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("set invalid project model");
+
+    let response = app
+        .post(&format!("/api/tasks/{reference}/dispatch"), None, &cookie)
+        .await;
+    assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.code(), "validation");
+    assert!(response.message().contains("invalid model"));
+    assert!(mock.create_requests().is_empty());
+}
+
+#[tokio::test]
+async fn project_model_syntax_is_validated_on_create_and_update() {
+    let (url, _mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+
+    let invalid_create = app
+        .post(
+            "/api/projects",
+            Some(json!({ "key": "BAD", "name": "Bad", "model": "not-a-model" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(invalid_create.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(invalid_create.code(), "validation");
+    assert!(invalid_create.message().contains("invalid model"));
+
+    let created = app
+        .post(
+            "/api/projects",
+            Some(json!({
+                "key": "ALP",
+                "name": "Alpha",
+                "model": " openai/gpt-5#max ",
+            })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+    assert_eq!(created.body["model"], "openai/gpt-5#max");
+    let project_id = created.body["id"].as_str().expect("id").to_owned();
+
+    let invalid_patch = app
+        .patch(
+            &format!("/api/projects/{project_id}"),
+            json!({ "model": "provider/" }),
+            &cookie,
+        )
+        .await;
+    assert_eq!(invalid_patch.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(invalid_patch.code(), "validation");
+    assert!(invalid_patch.message().contains("invalid model"));
+
+    let unchanged = app
+        .get(&format!("/api/projects/{project_id}"), &cookie)
+        .await;
+    assert_eq!(unchanged.body["model"], "openai/gpt-5#max");
+
+    let cleared = app
+        .patch(
+            &format!("/api/projects/{project_id}"),
+            json!({ "model": "   " }),
+            &cookie,
+        )
+        .await;
+    assert_eq!(cleared.status, StatusCode::OK, "{:?}", cleared.body);
+    assert!(cleared.body["model"].is_null());
+}
+
+#[tokio::test]
+async fn dispatch_rejects_unknown_body_fields() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "ALP", "Alpha").await;
+    let project_id = project["id"].as_str().expect("id");
+    app.patch(
+        &format!("/api/projects/{project_id}"),
+        json!({ "repo_path": "/home/me/code/alpha" }),
+        &cookie,
+    )
+    .await;
+    let card = app.create_card(&cookie, project_id, "Do it").await;
+    let reference = card["reference"].as_str().expect("ref");
+
+    let response = app
+        .post(
+            &format!("/api/tasks/{reference}/dispatch"),
+            Some(json!({ "thinking": "max" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(response.code(), "validation");
+    assert!(mock.create_requests().is_empty());
+}
+
+#[tokio::test]
 async fn dispatch_surfaces_an_upstream_rejection_as_a_bad_gateway() {
     let (url, mock) = start_mock().await;
     mock.set_create(400, json!({ "error": "worktree provisioning failed" }));

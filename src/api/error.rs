@@ -28,6 +28,12 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "validation", message)
     }
 
+    /// A validation failure that callers distinguish with 422, used for an
+    /// invalid `provider/model[#variant]` value.
+    pub fn unprocessable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "validation", message)
+    }
+
     /// A body-extraction failure keeps Axum's status (400/413/415) but uses the
     /// API's `validation` code. Data errors (422) become 400.
     pub fn rejection(status: StatusCode, message: impl Into<String>) -> Self {

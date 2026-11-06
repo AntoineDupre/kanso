@@ -14,7 +14,13 @@ import {
   toast,
   toastForError
 } from "./dom.js";
-import { confirmDialog, copyText, openLabelForm, openMoveMenu } from "./forms.js";
+import {
+  confirmDialog,
+  copyText,
+  openDispatchDialog,
+  openLabelForm,
+  openMoveMenu
+} from "./forms.js";
 
 const STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocker", "done"];
 const PRIORITIES = ["low", "normal", "high"];
@@ -1392,13 +1398,18 @@ export class Panel {
           {
             type: "button",
             class: "button button-primary button-small",
-            onClick: async () => {
-              const confirmed = await confirmDialog(
-                t("panel.dispatchConfirm", { ref: detail.reference }),
-                { title: t("panel.dispatch"), confirmLabel: t("panel.dispatch") }
-              );
-              if (!confirmed) return;
-              this.run(api.dispatchTask(detail.reference), t("toast.dispatched"));
+            onClick: () => {
+              openDispatchDialog({
+                reference: detail.reference,
+                agent: (project.agent || "").trim() || "build",
+                model: (project.model || "").trim(),
+                onSubmit: async (selection) => {
+                  const updated = await api.dispatchTask(detail.reference, selection);
+                  if (this.reference === detail.reference) {
+                    this.applyDetail(updated, t("toast.dispatched"));
+                  }
+                }
+              });
             }
           },
           [icon("globe", { size: 14 }), el("span", { text: t("panel.dispatch") })]

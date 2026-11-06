@@ -205,7 +205,7 @@ origin check; read-only GETs such as `/api/export.json` do not.
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/api/projects` | Active projects; `?archived=1` includes archived ones |
-| `POST` | `/api/projects` | `{key,name,description?,repo_path?,color?}` |
+| `POST` | `/api/projects` | `{key,name,description?,repo_path?,color?,model?}` |
 | `GET` | `/api/projects/:id_or_key` | Case-insensitive key |
 | `PATCH` | `/api/projects/:id` | Name, description, key, colour, repo and OpenChamber fields |
 | `POST` | `/api/projects/:id/archive` | Idempotent |
@@ -214,6 +214,15 @@ origin check; read-only GETs such as `/api/export.json` do not.
 
 Project keys are 2–6 characters of `A-Z`/`0-9`, stored uppercase and unique
 case-insensitively.
+
+A project `model`, and a dispatch model override, use the
+`provider/model[#variant]` syntax (for example
+`opencode-go/deepseek-v4.1-flash#max`). The optional `#variant` is the
+OpenChamber/OpenCode thinking level. Kanso splits the value and sends `model`
+and `variant` as separate fields, so the `#` never appears in the model id.
+Without `#`, no `variant` is sent. Empty or `null` means no project model; on
+dispatch, an empty override keeps the project value. An invalid model is
+`422 validation`.
 
 ### Tasks
 
@@ -227,7 +236,7 @@ case-insensitively.
 | `POST` | `/api/tasks/:ref/claim` | Human or agent; sets `claimed_by`, status → `in_progress` |
 | `POST` | `/api/tasks/:ref/release` | Clears the claim, keeps the column |
 | `POST` | `/api/tasks/:ref/session` | Human only; `{session_id,directory,status?}` with status `running` by default (also `idle`, `waiting`, `failed`, `offline`) |
-| `POST` | `/api/tasks/:ref/dispatch` | Human only; creates an OpenChamber session/worktree for the card when the adapter is enabled |
+| `POST` | `/api/tasks/:ref/dispatch` | Human only; optional `{agent?,model?}`; creates an OpenChamber session/worktree for the card when the adapter is enabled |
 | `POST` | `/api/tasks/:ref/dependencies` | `{blocked_by:[ref,…]}` replaces the set; `[]` clears it (human only) |
 | `POST` | `/api/tasks/:ref/archive` | Human only in M2 |
 | `POST` | `/api/tasks/:ref/restore` | Human only in M2 |

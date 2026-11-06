@@ -1,17 +1,30 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use rusqlite::params;
+use serde::Deserialize;
 use serde_json::json;
 
 use super::model::{Project, Task, TaskDetail};
 use super::projects::project_by_ref;
 use super::tasks::{insert_activity, task_by_ref, task_detail};
-use super::{now_millis, require_human, ApiError, Auth};
+use super::{now_millis, require_human, ApiError, Auth, OptionalApiJson};
 use crate::adapter::openchamber::{
-    build_session_create, CreatedSession, OpenChamberError, DISPATCH_TIMEOUT,
+    build_session_create, CreatedSession, DispatchSelection, OpenChamberError, DISPATCH_TIMEOUT,
+    MAX_DISPATCH_AGENT_CHARS,
 };
 use crate::rank;
 use crate::server::AppState;
+
+/// Optional overrides typed in the dispatch dialog. An empty value keeps the
+/// project setting, and unknown fields are rejected.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchBody {
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
 
 enum Loaded {
     Found(Box<Project>, Box<Task>),
@@ -47,6 +60,7 @@ pub async fn dispatch(
     State(state): State<AppState>,
     auth: Auth,
     Path(reference): Path<String>,
+    body: OptionalApiJson<DispatchBody>,
 ) -> Result<Json<TaskDetail>, ApiError> {
     require_human(&auth.0)?;
     let openchamber = state.openchamber.clone().ok_or_else(|| {
@@ -55,6 +69,25 @@ pub async fn dispatch(
             "OpenChamber integration is disabled; set KANSO_OPENCHAMBER_URL and KANSO_OPENCHAMBER_TOKEN",
         )
     })?;
+
+    let supplied = body.0.unwrap_or_default();
+    let selection = DispatchSelection {
+        agent: supplied
+            .agent
+            .map(|agent| agent.trim().to_owned())
+            .filter(|agent| !agent.is_empty()),
+        model: supplied
+            .model
+            .map(|model| model.trim().to_owned())
+            .filter(|model| !model.is_empty()),
+    };
+    if let Some(agent) = selection.agent.as_deref() {
+        if agent.chars().count() > MAX_DISPATCH_AGENT_CHARS {
+            return Err(ApiError::validation(format!(
+                "agent must be at most {MAX_DISPATCH_AGENT_CHARS} characters"
+            )));
+        }
+    }
 
     let loaded = state
         .db
@@ -105,6 +138,11 @@ pub async fn dispatch(
         ));
     }
 
+    // Validate the effective model (dispatch override or project default)
+    // before reserving the card or calling OpenChamber.
+    let payload = build_session_create(&project, &task, Some(&selection))
+        .map_err(|message| ApiError::unprocessable(format!("invalid model: {message}")))?;
+
     if !state.reserve_dispatch(&task.id) {
         return Err(ApiError::conflict_code(
             "already_dispatched",
@@ -116,7 +154,6 @@ pub async fn dispatch(
         task_id: task.id.clone(),
     };
 
-    let payload = build_session_create(&project, &task);
     let created = openchamber
         .create_session(payload, DISPATCH_TIMEOUT)
         .await

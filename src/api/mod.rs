@@ -2,7 +2,9 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Query, Request};
+use axum::extract::{
+    ConnectInfo, FromRequest, FromRequestParts, OptionalFromRequest, Query, Request,
+};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
@@ -281,8 +283,31 @@ where
     type Rejection = ApiError;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        match Json::<T>::from_request(request, state).await {
+        match <Json<T> as FromRequest<S>>::from_request(request, state).await {
             Ok(Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(ApiError::rejection(
+                rejection.status(),
+                format!("invalid JSON body: {}", rejection.body_text()),
+            )),
+        }
+    }
+}
+
+/// Optional JSON body: no `Content-Type` means `None`, while malformed JSON
+/// still produces the API error envelope through [`ApiJson`].
+pub struct OptionalApiJson<T>(pub Option<T>);
+
+impl<T, S> FromRequest<S> for OptionalApiJson<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match <Json<T> as OptionalFromRequest<S>>::from_request(request, state).await {
+            Ok(Some(Json(value))) => Ok(Self(Some(value))),
+            Ok(None) => Ok(Self(None)),
             Err(rejection) => Err(ApiError::rejection(
                 rejection.status(),
                 format!("invalid JSON body: {}", rejection.body_text()),

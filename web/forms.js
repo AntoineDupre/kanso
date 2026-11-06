@@ -144,6 +144,60 @@ export function confirmDialog(message, { title = "", confirmLabel = t("common.de
   });
 }
 
+export function openDispatchDialog({ reference, agent = "", model = "", onSubmit }) {
+  const agentInput = el("input", {
+    class: "input",
+    type: "text",
+    maxlength: "120",
+    value: agent,
+    placeholder: t("form.exampleAgent")
+  });
+  const modelInput = el("input", {
+    class: "input",
+    type: "text",
+    maxlength: "200",
+    value: model,
+    placeholder: t("form.exampleModel")
+  });
+  const error = formError();
+  const cancel = el("button", {
+    type: "button",
+    class: "button button-secondary",
+    text: t("form.cancel")
+  });
+  const submit = el("button", {
+    type: "submit",
+    class: "button button-primary",
+    text: t("panel.dispatch")
+  });
+  const form = el("form", { class: "form-stack" }, [
+    el("p", { class: "modal-message", text: t("panel.dispatchNote", { ref: reference }) }),
+    field(t("panel.dispatchAgent"), agentInput, t("panel.dispatchAgentHint")),
+    field(t("panel.dispatchModel"), modelInput, t("panel.dispatchModelHint")),
+    error,
+    el("div", { class: "form-actions" }, [cancel, submit])
+  ]);
+  const modal = openModal({ title: t("panel.dispatch"), body: form, size: "small" });
+  cancel.addEventListener("click", () => modal.close());
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    error.hidden = true;
+    setBusy(submit, true);
+    try {
+      await onSubmit({
+        agent: agentInput.value.trim(),
+        model: modelInput.value.trim()
+      });
+      modal.close();
+    } catch (failure) {
+      showError(error, failure.message || t("common.error"));
+    } finally {
+      setBusy(submit, false);
+    }
+  });
+  return modal;
+}
+
 function field(labelText, control, hint) {
   return el("label", { class: "field" }, [
     el("span", { class: "field-label", text: labelText }),
@@ -364,7 +418,7 @@ export function openProjectForm({ project = null, onSaved }) {
       el("p", { class: "field-hint", text: t("form.agentHint") }),
       el("div", { class: "form-row" }, [
         field(t("form.agent"), agent),
-        field(t("form.model"), model)
+        field(t("form.model"), model, t("form.modelHint"))
       ]),
       el("div", { class: "form-row" }, [
         field(t("form.baseBranch"), baseBranch),

@@ -25,6 +25,10 @@ pub const DISPATCH_TIMEOUT: Duration = Duration::from_secs(150);
 const MAX_SLUG_CHARS: usize = 40;
 const DEFAULT_AGENT: &str = "build";
 const DEFAULT_BASE_BRANCH: &str = "main";
+/// Longest accepted `provider/model[#variant]` value.
+pub const MAX_MODEL_CHARS: usize = 200;
+/// Longest accepted agent name typed at dispatch.
+pub const MAX_DISPATCH_AGENT_CHARS: usize = 120;
 
 /// The built-in prompt template from PLAN §9.
 pub const DEFAULT_PROMPT_TEMPLATE: &str = "You are working on card {{ref}}: {{title}}
@@ -597,8 +601,98 @@ pub fn worktree_branch(task: &Task) -> String {
     format!("kanso/{}-{}", task.reference, slugify(&task.title))
 }
 
+/// A model split into the two fields OpenChamber's `session.create` expects.
+///
+/// Kanso's visible syntax is `provider/model[#variant]`; OpenChamber takes
+/// `model` and `variant` separately, so the `#` is never sent upstream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelSpec {
+    pub model: String,
+    pub variant: Option<String>,
+}
+
+/// Agent and model overrides typed at dispatch. `None` or an empty value means
+/// "inherit the project setting".
+#[derive(Clone, Debug, Default)]
+pub struct DispatchSelection {
+    pub agent: Option<String>,
+    pub model: Option<String>,
+}
+
+impl DispatchSelection {
+    fn agent(&self) -> Option<&str> {
+        self.agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn model(&self) -> Option<&str> {
+        self.model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+}
+
+/// Parse `provider/model[#variant]`. An empty value is `Ok(None)`, meaning no
+/// model is selected. The returned `model` is always `provider/model`.
+pub fn parse_model(raw: &str) -> Result<Option<ModelSpec>, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > MAX_MODEL_CHARS {
+        return Err(format!(
+            "model must be at most {MAX_MODEL_CHARS} characters"
+        ));
+    }
+    if value.matches('#').count() > 1 {
+        return Err("model must contain at most one '#'".to_owned());
+    }
+
+    let (base, variant) = match value.split_once('#') {
+        Some((base, variant)) => {
+            let variant = variant.trim();
+            if variant.is_empty() {
+                return Err("model variant must not be empty after '#'".to_owned());
+            }
+            (base, Some(variant.to_owned()))
+        }
+        None => (value, None),
+    };
+
+    let Some((provider, model)) = base.split_once('/') else {
+        return Err("model must use provider/model[#variant]".to_owned());
+    };
+    if model.contains('/') {
+        return Err("model must use exactly one '/' between provider and model".to_owned());
+    }
+    let provider = provider.trim();
+    let model = model.trim();
+    if provider.is_empty() {
+        return Err("model provider must not be empty".to_owned());
+    }
+    if model.is_empty() {
+        return Err("model name must not be empty".to_owned());
+    }
+
+    Ok(Some(ModelSpec {
+        model: format!("{provider}/{model}"),
+        variant,
+    }))
+}
+
 /// Build the exact `session.create` control payload for one card.
-pub fn build_session_create(project: &Project, task: &Task) -> Value {
+///
+/// An explicit dispatch selection wins over the project setting. The effective
+/// model is split so OpenChamber receives `model` and `variant` separately; a
+/// value without `#` sends no `variant` at all.
+pub fn build_session_create(
+    project: &Project,
+    task: &Task,
+    selection: Option<&DispatchSelection>,
+) -> Result<Value, String> {
     let template = project
         .prompt_template
         .as_deref()
@@ -615,6 +709,24 @@ pub fn build_session_create(project: &Project, task: &Task) -> Value {
     );
     let branch = worktree_branch(task);
 
+    let agent = selection
+        .and_then(DispatchSelection::agent)
+        .or_else(|| {
+            project
+                .agent
+                .as_deref()
+                .map(str::trim)
+                .filter(|agent| !agent.is_empty())
+        })
+        .unwrap_or(DEFAULT_AGENT);
+    let model = selection.and_then(DispatchSelection::model).or_else(|| {
+        project
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+    });
+
     let mut input = serde_json::Map::new();
     input.insert(
         "directory".to_owned(),
@@ -625,22 +737,13 @@ pub fn build_session_create(project: &Project, task: &Task) -> Value {
         json!(format!("{} — {}", task.reference, task.title)),
     );
     input.insert("prompt".to_owned(), json!(prompt));
-    input.insert(
-        "agent".to_owned(),
-        json!(project
-            .agent
-            .as_deref()
-            .map(str::trim)
-            .filter(|agent| !agent.is_empty())
-            .unwrap_or(DEFAULT_AGENT)),
-    );
-    if let Some(model) = project
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-    {
-        input.insert("model".to_owned(), json!(model));
+    input.insert("agent".to_owned(), json!(agent));
+    if let Some(raw) = model {
+        let spec = parse_model(raw)?.ok_or_else(|| "model must not be empty".to_owned())?;
+        input.insert("model".to_owned(), json!(spec.model));
+        if let Some(variant) = spec.variant {
+            input.insert("variant".to_owned(), json!(variant));
+        }
     }
     input.insert(
         "worktree".to_owned(),
@@ -662,7 +765,7 @@ pub fn build_session_create(project: &Project, task: &Task) -> Value {
     );
     input.insert("wait".to_owned(), json!(false));
 
-    json!({ "action": "session.create", "input": Value::Object(input) })
+    Ok(json!({ "action": "session.create", "input": Value::Object(input) }))
 }
 
 #[cfg(test)]
@@ -775,7 +878,8 @@ mod tests {
 
     #[test]
     fn payload_uses_plan_defaults() {
-        let payload = build_session_create(&project(), &task("Fix the Flux Capacitor"));
+        let payload = build_session_create(&project(), &task("Fix the Flux Capacitor"), None)
+            .expect("payload");
         assert_eq!(payload["action"], "session.create");
         let input = &payload["input"];
         assert_eq!(input["directory"], "/home/me/code/alpha");
@@ -805,7 +909,7 @@ mod tests {
         project.worktree = false;
         project.prompt_template =
             Some("Card {{ref}} — {{title}}\n{{project}}\n{{description}}".into());
-        let payload = build_session_create(&project, &task("Fix it"));
+        let payload = build_session_create(&project, &task("Fix it"), None).expect("payload");
         let input = &payload["input"];
         assert_eq!(input["agent"], "plan");
         assert_eq!(input["model"], "provider/model");
@@ -825,12 +929,130 @@ mod tests {
         project.model = Some(String::new());
         project.base_branch = Some(String::new());
         project.prompt_template = Some("   ".to_owned());
-        let payload = build_session_create(&project, &task("Fix it"));
+        let payload = build_session_create(&project, &task("Fix it"), None).expect("payload");
         let input = &payload["input"];
         assert_eq!(input["agent"], "build");
         assert_eq!(input["startRef"], "main");
         assert!(input.get("model").is_none());
         assert!(input["prompt"].as_str().expect("prompt").contains("Rules:"));
+    }
+
+    #[test]
+    fn models_split_provider_model_and_optional_variant() {
+        assert_eq!(
+            parse_model("openai/gpt-5").expect("valid").expect("model"),
+            ModelSpec {
+                model: "openai/gpt-5".to_owned(),
+                variant: None,
+            }
+        );
+        assert_eq!(
+            parse_model(" opencode-go/deepseek-v4.1-flash#max ")
+                .expect("valid")
+                .expect("model"),
+            ModelSpec {
+                model: "opencode-go/deepseek-v4.1-flash".to_owned(),
+                variant: Some("max".to_owned()),
+            }
+        );
+        assert_eq!(parse_model("   ").expect("empty"), None);
+        assert_eq!(parse_model("").expect("empty"), None);
+    }
+
+    #[test]
+    fn invalid_model_syntax_is_rejected() {
+        for invalid in [
+            "model",
+            "/model",
+            "provider/",
+            "provider/model#",
+            "provider/model#high#max",
+            "provider/model/extra",
+            "provider/model#   ",
+        ] {
+            assert!(parse_model(invalid).is_err(), "{invalid:?}");
+        }
+        assert!(parse_model(&"x".repeat(MAX_MODEL_CHARS + 1)).is_err());
+        assert!(parse_model(&format!("p/{}", "x".repeat(MAX_MODEL_CHARS))).is_err());
+    }
+
+    #[test]
+    fn project_model_with_variant_is_split_in_the_payload() {
+        let mut project = project();
+        project.model = Some("provider/model#max".to_owned());
+        let payload = build_session_create(&project, &task("Fix it"), None).expect("payload");
+        let input = &payload["input"];
+        assert_eq!(input["model"], "provider/model");
+        assert_eq!(input["variant"], "max");
+    }
+
+    #[test]
+    fn dispatch_model_overrides_the_project_model() {
+        let mut project = project();
+        project.model = Some("provider/model#max".to_owned());
+        let selection = DispatchSelection {
+            agent: None,
+            model: Some("anthropic/claude#high".to_owned()),
+        };
+        let payload =
+            build_session_create(&project, &task("Fix it"), Some(&selection)).expect("payload");
+        let input = &payload["input"];
+        assert_eq!(input["model"], "anthropic/claude");
+        assert_eq!(input["variant"], "high");
+    }
+
+    #[test]
+    fn a_model_without_variant_has_no_variant_key() {
+        let mut project = project();
+        project.model = Some("provider/model#max".to_owned());
+        let selection = DispatchSelection {
+            agent: None,
+            model: Some("other/model".to_owned()),
+        };
+        let payload =
+            build_session_create(&project, &task("Fix it"), Some(&selection)).expect("payload");
+        let input = &payload["input"];
+        assert_eq!(input["model"], "other/model");
+        assert!(input.get("variant").is_none());
+    }
+
+    #[test]
+    fn dispatch_agent_falls_back_to_the_project_then_build() {
+        let mut project = project();
+        project.agent = Some("plan".to_owned());
+        let blank = DispatchSelection {
+            agent: Some("  ".to_owned()),
+            model: None,
+        };
+        let payload =
+            build_session_create(&project, &task("Fix it"), Some(&blank)).expect("payload");
+        assert_eq!(payload["input"]["agent"], "plan");
+
+        let override_agent = DispatchSelection {
+            agent: Some("review".to_owned()),
+            model: None,
+        };
+        let payload = build_session_create(&project, &task("Fix it"), Some(&override_agent))
+            .expect("payload");
+        assert_eq!(payload["input"]["agent"], "review");
+
+        project.agent = Some("  ".to_owned());
+        let payload = build_session_create(&project, &task("Fix it"), None).expect("payload");
+        assert_eq!(payload["input"]["agent"], "build");
+    }
+
+    #[test]
+    fn an_invalid_inherited_or_overridden_model_fails_the_payload() {
+        let mut project = project();
+        project.model = Some("not-a-model".to_owned());
+        assert!(build_session_create(&project, &task("Fix it"), None).is_err());
+
+        project.model = None;
+        let selection = DispatchSelection {
+            agent: None,
+            model: Some("also-bad".to_owned()),
+        };
+        assert!(build_session_create(&project, &task("Fix it"), Some(&selection)).is_err());
     }
 
     #[test]

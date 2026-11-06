@@ -147,8 +147,8 @@ export const api = {
 
   exportDump: () => download("/api/export.json"),
 
-  dispatchTask: (reference) =>
-    request(`/api/tasks/${enc(reference)}/dispatch`, { method: "POST" }),
+  dispatchTask: (reference, payload) =>
+    request(`/api/tasks/${enc(reference)}/dispatch`, { method: "POST", body: payload }),
 
   linkSession: (reference, payload) =>
     request(`/api/tasks/${enc(reference)}/session`, { method: "POST", body: payload }),

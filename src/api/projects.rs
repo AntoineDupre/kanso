@@ -10,6 +10,7 @@ use super::{
     deserialize_present, parse_flag, require_human, validate_color, ApiError, ApiJson, ApiQuery,
     Auth,
 };
+use crate::adapter::openchamber::parse_model;
 use crate::ids;
 use crate::server::AppState;
 
@@ -31,6 +32,8 @@ pub struct CreateProject {
     repo_path: Option<String>,
     #[serde(default)]
     color: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +85,17 @@ fn validate_name(raw: &str) -> Result<String, ApiError> {
         ));
     }
     Ok(name.to_owned())
+}
+
+/// Trim and validate a project model. An empty value stores `NULL`.
+fn validate_model(raw: &str) -> Result<Option<String>, ApiError> {
+    let model = raw.trim();
+    if model.is_empty() {
+        return Ok(None);
+    }
+    parse_model(model)
+        .map_err(|error| ApiError::unprocessable(format!("invalid model: {error}")))?;
+    Ok(Some(model.to_owned()))
 }
 
 pub(super) fn project_by_ref(
@@ -155,6 +169,10 @@ pub async fn create(
     };
     let description = payload.description.unwrap_or_default();
     let repo_path = payload.repo_path;
+    let model = match payload.model.as_deref() {
+        Some(raw) => validate_model(raw)?,
+        None => None,
+    };
     let id = ids::uuid_v4()?;
     let now = super::now_millis();
 
@@ -180,9 +198,19 @@ pub async fn create(
             )?;
             transaction.execute(
                 "INSERT INTO projects
-                 (id, key, name, description, repo_path, color, position, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
-                params![id, key, name, description, repo_path, color, position, now],
+                 (id, key, name, description, repo_path, color, position, model, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                params![
+                    id,
+                    key,
+                    name,
+                    description,
+                    repo_path,
+                    color,
+                    position,
+                    model,
+                    now
+                ],
             )?;
             let project = project_by_ref(&transaction, &id)?
                 .ok_or_else(|| crate::error::Error::msg("created project missing"))?;
@@ -220,13 +248,18 @@ pub async fn update(
     let key = payload.key.as_deref().map(normalise_key).transpose()?;
     let name = payload.name.as_deref().map(validate_name).transpose()?;
     let color = payload.color.as_deref().map(validate_color).transpose()?;
+    let model = match payload.model.as_ref() {
+        Some(Some(raw)) => validate_model(raw)?,
+        Some(None) | None => None,
+    };
+    let model_present = payload.model.is_some();
     let empty = key.is_none()
         && name.is_none()
         && color.is_none()
         && payload.description.is_none()
         && payload.repo_path.is_none()
         && payload.agent.is_none()
-        && payload.model.is_none()
+        && !model_present
         && payload.base_branch.is_none()
         && payload.prompt_template.is_none()
         && payload.worktree.is_none();
@@ -295,12 +328,19 @@ pub async fn update(
                 )?;
                 project.agent = agent.clone();
             }
-            if let Some(model) = &payload.model {
+            if let Some(model) = &model {
                 transaction.execute(
                     "UPDATE projects SET model = ?1 WHERE id = ?2",
                     params![model, project.id],
                 )?;
-                project.model = model.clone();
+                project.model = Some(model.clone());
+            }
+            if model_present && model.is_none() {
+                transaction.execute(
+                    "UPDATE projects SET model = NULL WHERE id = ?1",
+                    params![project.id],
+                )?;
+                project.model = None;
             }
             if let Some(base_branch) = &payload.base_branch {
                 transaction.execute(
