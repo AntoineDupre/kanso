@@ -177,7 +177,8 @@ All API responses are JSON except the SSE stream; timestamps are Unix millisecon
 `unauthorized`, `forbidden`, `not_found`, `conflict`, `csrf`, `rate_limited`
 and `internal` (500), plus the specific conflict codes `already_claimed`,
 `not_claimable`, `dependency_unmet`, `not_claimed`, `not_active`,
-`not_proposed` and `already_dispatched`. The optional OpenChamber adapter adds
+`not_proposed`, `already_dispatched`, `not_blocked`, `no_session`,
+`not_a_reply` and `already_sent`. The optional OpenChamber adapter adds
 `integration_disabled`/`integration_unreachable` (503) and
 `openchamber_error` (502). `GET /api/health` and `POST /api/auth/login` are public; every
 other `/api` route needs a session cookie or `Authorization: Bearer kanso_...`.
@@ -240,6 +241,8 @@ be corrected.
 | `POST` | `/api/tasks/:ref/release` | Clears the claim, keeps the column |
 | `POST` | `/api/tasks/:ref/session` | Human only; `{session_id,directory,status?}` with status `running` by default (also `idle`, `waiting`, `failed`, `offline`) |
 | `POST` | `/api/tasks/:ref/dispatch` | Human only; optional `{agent?,model?}`; creates an OpenChamber session/worktree for the card when the adapter is enabled |
+| `POST` | `/api/tasks/:ref/reply` | Human only; `{body}`; records the answer as a comment and forwards it into the card's OpenChamber session |
+| `POST` | `/api/tasks/:ref/reply/:comment_id` | Human only; retries a failed or unknown reply with the stored prompt and session |
 | `POST` | `/api/tasks/:ref/dependencies` | `{blocked_by:[ref,…]}` replaces the set; `[]` clears it (human only) |
 | `POST` | `/api/tasks/:ref/archive` | Human only in M2 |
 | `POST` | `/api/tasks/:ref/restore` | Human only in M2 |
@@ -259,6 +262,35 @@ that column, an explicit `status` wins over `restore`, and a move with neither
 clears `blocked_from`/`blocked_reason` while keeping the card in `blocker` —
 unless it sends `reason`, which updates `blocked_reason` in place and keeps
 `blocked_from`. Entering `done` sets `done_at`; leaving it clears the timestamp.
+
+A card in `blocker` shows its `blocked_reason` as the agent's question. The human
+answers with `POST /api/tasks/:ref/reply`: Kanso stores the answer as an ordinary
+comment (author = human) and forwards a wrapper into the card's existing session.
+The reply route answers `201 {comment, delivery}` as soon as the comment exists,
+even when delivery fails:
+
+```json
+{"comment": {"id": "…", "author": "ui", "body": "…", "created_at": 0,
+             "delivery_status": "sent", "delivery_error": null},
+ "delivery": {"status": "sent", "session_id": "ses_…", "error": null}}
+```
+
+`delivery.status` is `sent` (2xx with `promptDispatched:true`), `failed` (a 2xx
+with `promptDispatched:false`, or an HTTP error) or `unknown` (a transport error
+or an invalid 2xx body: the prompt may have arrived). A reply comment carries
+`delivery_status` and `delivery_error`; ordinary comments have both `null`.
+`POST /api/tasks/:ref/reply/:comment_id` reuses the stored `reply_prompt`,
+session id and directory, so a retry is byte-identical (the prompt names the
+comment id so the agent can ignore a duplicate). Retrying a `sent` reply is
+`409 already_sent`; a normal comment is `409 not_a_reply`.
+
+Replies require an active card in `blocker` with an agent session
+(`409 not_blocked`, `409 no_session`) and an enabled integration
+(`503 integration_disabled`). The reply itself never moves the card: on `sent`
+Kanso sets the card's `session_status` to `running`, clears `attention` and
+leaves the status alone, so the agent remains responsible for moving the card
+out of `blocker`. The panel notifies the human when a card enters `blocker` with
+a reason or a session.
 
 An agent-scope bearer token may send `X-Kanso-Agent: <name>` to override its
 token name in comments, activity and `created_by`. Claim ownership (`claimed_by`,
@@ -297,7 +329,7 @@ Accepting or rejecting a card that is not proposed returns `409 not_proposed`.
 `backlog`, `todo`, `in_progress`, `in_review`, `blocker` and `done`; each array
 contains active cards ordered by `rank` then `number`. A card carries `id`,
 `reference`, `title`, `status`, `priority`, `due_date`, `labels`, `claimed_by`,
-`attention`, `session_status`, `blocked_from`, `checklist_done`,
+`attention`, `session_status`, `blocked_from`, `blocked_reason`, `checklist_done`,
 `checklist_total` and `blocked` (an unfinished `blocked_by` card) — not the full
 detail. The checklist counters and `blocked` flag are additions needed by the
 web cards, which show `2/3` progress and a lock without fetching every detail.
@@ -316,7 +348,7 @@ Event types include `task.created`, `task.updated`, `task.moved`, `task.claimed`
 `task.released`, `task.archived`, `task.restored`, `task.deleted`,
 `dependencies.changed`, `proposal.created`, `proposal.accepted`,
 `proposal.rejected`, `project.created`, `project.updated`, `project.archived`,
-`comment.created`, `checklist.created`, `checklist.updated`,
+`comment.created`, `comment.updated`, `checklist.created`, `checklist.updated`,
 `checklist.deleted`, `label.created`, `label.updated` and `label.deleted`.
 Task events carry the card summary under `data.task`; `task.moved` also carries
 `from`, `to`, the activity kind (`moved`, `blocked` or `unblocked`) and the
@@ -351,12 +383,16 @@ delete checklist items, or manage projects/labels/tokens.
 
 Every task mutation writes an `activity` row (`created`, `proposed`, `updated`,
 `moved`, `blocked`, `unblocked`, `claimed`, `released`, `accepted`, `rejected`,
-`dependencies_changed`, `commented`, `checklist_added`, `checklist_updated`,
+`dependencies_changed`, `commented`, `reply_sent`, `reply_failed`,
+`reply_unknown`, `checklist_added`, `checklist_updated`,
 `checklist_removed`, `label_added`, `label_removed`, `session_linked`,
 `dispatched`, `auto_moved`, `session_idle`, `session_failed`,
 `session_offline`, `session_running`, `permission_auto_accept_failed`,
 `dispatch_abandoned`, `archived`, `restored`)
-with a small JSON `data` payload.
+with a small JSON `data` payload. `blocked` carries the `reason`, and a `moved`
+row carries `reason` when the reason changes while the card is already blocked.
+Each reply attempt writes `reply_sent`, `reply_failed` or `reply_unknown` with
+`comment_id`, `session_id` and, on failure, `error`.
 
 The data directory also holds `session.key`, a random 0600 HMAC key used to sign
 session cookies; deleting it revokes every UI session.

@@ -245,3 +245,47 @@ Network panel.
    http://127.0.0.1:8087/api/export.json` returns `403 forbidden`; a human token
    or the cookie session returns the dump with `Content-Type: application/json`,
    `Content-Disposition: attachment; …` and `Cache-Control: no-store`.
+
+## 13. Blocked agent dialog
+
+Setup: OpenChamber is enabled, the card has a linked session (dispatch or
+**Link an existing session**) and the project has a `repo_path`.
+
+### Happy path
+
+1. As an agent token, run `kanso move ALP-42 blocker --reason "Use main or develop?"`.
+   The board card shows one truncated reason line under the title; hovering the
+   lock shows the full question. The card stays in Blocker, and (with
+   notifications enabled and the tab hidden) one "{ref} needs an answer"
+   notification fires.
+2. Open the card: an **Agent question** section appears after the summary, with
+   the Markdown question, the session status and a reply box. Focus is not taken.
+3. Type an answer and press **Send reply**. The reply appears immediately as a
+   comment by **You**; the box clears for a follow-up; **Last reply sent …**
+   appears. In the agent's OpenChamber session the prompt begins
+   `Human reply on ALP-42 — … (reply <comment id>):`, quotes the question and
+   ends with the "move the card out of blocker" instruction.
+4. The card is still in Blocker, its `session_status` is `running` and
+   `attention` is cleared. The agent continues and moves the card out of
+   Blocker; the panel's Agent question section disappears and the reply stays in
+   the comment thread.
+
+### Failed delivery and retry
+
+1. Stop OpenChamber (or make `session.send` answer HTTP 500). Send a reply.
+   The reply is recorded, a toast says delivery failed, and the panel shows the
+   error with **Retry**; the comment carries a **Not delivered** badge whose
+   tooltip is the upstream error.
+2. Restart OpenChamber and press **Retry** in the panel or on the comment. The
+   reply becomes **sent**, the badge disappears, and the card's status is only
+   `running`/`attention=0`; the column did not change. A retry after a
+   successful delivery answers `409 already_sent`.
+
+### Unknown delivery
+
+1. Point the adapter at an unreachable URL or return a malformed 2xx body. Send
+   a reply: it is recorded with an **unknown** delivery, and the panel warns that
+   the agent may already have the message; the action is **Retry anyway** and
+   explicitly mentions a possible duplicate.
+2. Retry once the service is reachable: the stored prompt is resent unchanged
+   (the reply comment id in the prompt lets the agent deduplicate it).

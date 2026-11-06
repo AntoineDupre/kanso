@@ -103,6 +103,8 @@ mod tests {
             "kanso claim ALP-42",
             "kanso move ALP-42 in_review",
             "kanso move ALP-42 blocker --reason",
+            "answer arrives as a new message",
+            "Do not poll for the",
             "Never move a card to `done`",
             "kanso propose",
             "current worktree",

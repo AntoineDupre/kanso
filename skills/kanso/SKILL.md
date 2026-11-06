@@ -26,7 +26,10 @@ given: never create another worktree, change directory, or touch another card.
    in progress until it is ready for human review.
 6. **If blocked**, run
    `kanso move ALP-42 blocker --reason "what you need"`. The reason is shown on
-   the board; keep it concrete and short (500 characters at most).
+   the board; keep it concrete and short (500 characters at most). The human's
+   answer arrives as a new message in the same session; continue the work and
+   move the card out of blocker when you are unblocked. Do not poll for the
+   answer.
 
 ## Rules
 
