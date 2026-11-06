@@ -1813,6 +1813,56 @@ async fn a_failed_reply_is_recorded_and_can_be_retried_with_the_same_prompt() {
 }
 
 #[tokio::test]
+async fn retry_works_after_the_card_left_blocker() {
+    let (url, mock) = start_mock().await;
+    mock.set_send(
+        200,
+        json!({ "promptDispatched": false, "promptError": "temporarily unavailable" }),
+    );
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let reference = app.blocked_card(&cookie, "ALP", "question").await;
+
+    let first = app
+        .post(
+            &format!("/api/tasks/{reference}/reply"),
+            Some(json!({ "body": "answer" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(first.status, StatusCode::CREATED, "{:?}", first.body);
+    let comment_id = first.body["comment"]["id"]
+        .as_str()
+        .expect("comment id")
+        .to_owned();
+    assert_eq!(first.body["delivery"]["status"], "failed");
+
+    // The agent keeps working elsewhere: the retry only needs an active card.
+    let moved = app
+        .post(
+            &format!("/api/tasks/{reference}/move"),
+            Some(json!({ "status": "in_progress" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(moved.status, StatusCode::OK, "{:?}", moved.body);
+
+    mock.set_send(200, json!({ "promptDispatched": true }));
+    let retry = app
+        .post(
+            &format!("/api/tasks/{reference}/reply/{comment_id}"),
+            None,
+            &cookie,
+        )
+        .await;
+    assert_eq!(retry.status, StatusCode::OK, "{:?}", retry.body);
+    assert_eq!(retry.body["delivery"]["status"], "sent");
+    let detail = app.detail(&cookie, &reference).await;
+    assert_eq!(detail["status"], "in_progress");
+    assert_eq!(detail["session_status"], "running");
+}
+
+#[tokio::test]
 async fn a_transport_failure_marks_delivery_unknown_and_leaves_the_card_alone() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
