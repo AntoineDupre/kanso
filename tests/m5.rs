@@ -50,6 +50,8 @@ struct Mock {
     create_delay_ms: Arc<AtomicU64>,
     auto_accept_status: Arc<AtomicU16>,
     version_status: Arc<AtomicU16>,
+    send_status: Arc<AtomicU16>,
+    send_body: Arc<Mutex<Value>>,
     list_queue: Arc<Mutex<VecDeque<(u16, Value)>>>,
 }
 
@@ -65,6 +67,8 @@ impl Mock {
             }))),
             auto_accept_status: Arc::new(AtomicU16::new(200)),
             version_status: Arc::new(AtomicU16::new(200)),
+            send_status: Arc::new(AtomicU16::new(200)),
+            send_body: Arc::new(Mutex::new(json!({ "promptDispatched": true }))),
             list_queue: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
@@ -118,6 +122,24 @@ impl Mock {
 
     fn set_auto_accept_status(&self, status: u16) {
         self.auto_accept_status.store(status, Ordering::SeqCst);
+    }
+
+    fn set_send(&self, status: u16, body: Value) {
+        self.send_status.store(status, Ordering::SeqCst);
+        *self
+            .send_body
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = body;
+    }
+
+    fn send_requests(&self) -> Vec<RecordedRequest> {
+        self.requests()
+            .into_iter()
+            .filter(|request| {
+                request.method == "POST"
+                    && request.body.get("action").and_then(Value::as_str) == Some("session.send")
+            })
+            .collect()
     }
 
     fn set_create_delay(&self, millis: u64) {
@@ -196,6 +218,15 @@ async fn mock_control(
                 Some((status, body)) => response(status, body),
                 None => response(200, json!({ "sessions": [] })),
             }
+        }
+        Some("session.send") => {
+            let status = mock.send_status.load(Ordering::SeqCst);
+            let body = mock
+                .send_body
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            response(status, body)
         }
         _ => response(400, json!({ "error": "unknown action" })),
     }
@@ -528,6 +559,36 @@ impl TestApp {
             .poll_once(&self.state)
             .await
             .expect("poll OpenChamber");
+    }
+
+    /// A card with a linked session, moved to blocker with a question.
+    async fn blocked_card(&self, cookie: &str, key: &str, reason: &str) -> String {
+        let project = self.create_project(cookie, key, "Alpha").await;
+        let card = self
+            .create_card(cookie, project["id"].as_str().expect("id"), "Do it")
+            .await;
+        let reference = card["reference"].as_str().expect("ref").to_owned();
+        let linked = self
+            .post(
+                &format!("/api/tasks/{reference}/session"),
+                Some(json!({
+                    "session_id": "ses_reply",
+                    "directory": "/tmp/kanso-session",
+                    "status": "running",
+                })),
+                cookie,
+            )
+            .await;
+        assert_eq!(linked.status, StatusCode::OK, "{:?}", linked.body);
+        let moved = self
+            .post(
+                &format!("/api/tasks/{reference}/move"),
+                Some(json!({ "status": "blocker", "reason": reason })),
+                cookie,
+            )
+            .await;
+        assert_eq!(moved.status, StatusCode::OK, "{:?}", moved.body);
+        reference
     }
 }
 
@@ -1534,6 +1595,528 @@ async fn auto_accept_failure_keeps_the_dispatch_and_is_recorded() {
         kinds.contains(&"permission_auto_accept_failed"),
         "{kinds:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Reply dialog
+
+#[tokio::test]
+async fn reply_stores_a_comment_and_forwards_the_wrapper_to_the_session() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let reference = app
+        .blocked_card(&cookie, "ALP", "Use main or develop?")
+        .await;
+    let task_id = app.detail(&cookie, &reference).await["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    app.state
+        .db
+        .call(move |connection| {
+            connection.execute(
+                "UPDATE tasks SET attention = 1, session_status = 'waiting' WHERE id = ?1",
+                [&task_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("seed attention");
+
+    let response = app
+        .post(
+            &format!("/api/tasks/{reference}/reply"),
+            Some(json!({ "body": "main" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::CREATED, "{:?}", response.body);
+    let comment_id = response.body["comment"]["id"]
+        .as_str()
+        .expect("comment id")
+        .to_owned();
+    assert_eq!(response.body["comment"]["author"], "ui");
+    assert_eq!(response.body["comment"]["body"], "main");
+    assert_eq!(response.body["comment"]["delivery_status"], "sent");
+    assert!(response.body["comment"]["delivery_error"].is_null());
+    assert_eq!(response.body["delivery"]["status"], "sent");
+    assert_eq!(response.body["delivery"]["session_id"], "ses_reply");
+    assert!(response.body["delivery"]["error"].is_null());
+
+    let sends = mock.send_requests();
+    assert_eq!(sends.len(), 1);
+    assert_eq!(sends[0].path, "/api/openchamber/control");
+    assert_eq!(
+        sends[0].authorization.as_deref(),
+        Some(format!("Bearer {TOKEN}").as_str())
+    );
+    let input = &sends[0].body["input"];
+    assert_eq!(sends[0].body["action"], "session.send");
+    assert_eq!(input["sessionId"], "ses_reply");
+    assert_eq!(input["directory"], "/tmp/kanso-session");
+    assert_eq!(input["wait"], false);
+    assert_eq!(
+        input["prompt"],
+        format!(
+            "Human reply on {reference} — Do it (reply {comment_id}):\n> Use main or develop?\n\nmain\n\nContinue the work and move the card out of blocker when you are unblocked."
+        )
+    );
+
+    let detail = app.detail(&cookie, &reference).await;
+    assert_eq!(detail["status"], "blocker");
+    assert_eq!(detail["session_status"], "running");
+    assert_eq!(detail["attention"], false);
+    assert_eq!(detail["blocked_reason"], "Use main or develop?");
+    let comments = detail["comments"].as_array().expect("comments");
+    let stored = comments
+        .iter()
+        .find(|comment| comment["id"] == comment_id)
+        .expect("reply comment");
+    assert_eq!(stored["delivery_status"], "sent");
+    assert!(stored["delivery_error"].is_null());
+
+    let activity = detail["activity"].as_array().expect("activity");
+    let kinds: Vec<&str> = activity
+        .iter()
+        .filter_map(|entry| entry["kind"].as_str())
+        .collect();
+    assert!(kinds.contains(&"commented"), "{kinds:?}");
+    assert!(kinds.contains(&"reply_sent"), "{kinds:?}");
+    let sent = activity
+        .iter()
+        .find(|entry| entry["kind"] == "reply_sent")
+        .expect("reply_sent activity");
+    assert_eq!(sent["data"]["comment_id"], comment_id);
+    assert_eq!(sent["data"]["session_id"], "ses_reply");
+    assert!(sent["data"].get("error").is_none());
+    let blocked = activity
+        .iter()
+        .find(|entry| entry["kind"] == "blocked")
+        .expect("blocked activity");
+    assert_eq!(blocked["data"]["reason"], "Use main or develop?");
+
+    let again = app
+        .post(
+            &format!("/api/tasks/{reference}/reply/{comment_id}"),
+            None,
+            &cookie,
+        )
+        .await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+    assert_eq!(again.code(), "already_sent");
+}
+
+#[tokio::test]
+async fn a_failed_reply_is_recorded_and_can_be_retried_with_the_same_prompt() {
+    let (url, mock) = start_mock().await;
+    mock.set_send(
+        200,
+        json!({
+            "promptDispatched": false,
+            "promptError": "session is not accepting prompts"
+        }),
+    );
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let reference = app.blocked_card(&cookie, "ALP", "Which branch?").await;
+    let task_id = app.detail(&cookie, &reference).await["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    app.state
+        .db
+        .call(move |connection| {
+            connection.execute(
+                "UPDATE tasks SET attention = 1, session_status = 'waiting' WHERE id = ?1",
+                [&task_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("seed attention");
+
+    let first = app
+        .post(
+            &format!("/api/tasks/{reference}/reply"),
+            Some(json!({ "body": "main" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(first.status, StatusCode::CREATED, "{:?}", first.body);
+    let comment_id = first.body["comment"]["id"]
+        .as_str()
+        .expect("comment id")
+        .to_owned();
+    assert_eq!(first.body["delivery"]["status"], "failed");
+    assert_eq!(
+        first.body["delivery"]["error"],
+        "session is not accepting prompts"
+    );
+    assert_eq!(first.body["comment"]["delivery_status"], "failed");
+    assert_eq!(
+        first.body["comment"]["delivery_error"],
+        "session is not accepting prompts"
+    );
+
+    let detail = app.detail(&cookie, &reference).await;
+    assert_eq!(detail["status"], "blocker");
+    assert_eq!(detail["session_status"], "waiting");
+    assert_eq!(detail["attention"], true);
+    let kinds: Vec<&str> = detail["activity"]
+        .as_array()
+        .expect("activity")
+        .iter()
+        .filter_map(|entry| entry["kind"].as_str())
+        .collect();
+    assert!(kinds.contains(&"reply_failed"), "{kinds:?}");
+    let failed = detail["activity"]
+        .as_array()
+        .expect("activity")
+        .iter()
+        .find(|entry| entry["kind"] == "reply_failed")
+        .expect("reply_failed activity");
+    assert_eq!(failed["data"]["error"], "session is not accepting prompts");
+
+    let first_prompt = mock.send_requests()[0].body["input"]["prompt"].clone();
+
+    mock.set_send(200, json!({ "promptDispatched": true }));
+    let retry = app
+        .post(
+            &format!("/api/tasks/{reference}/reply/{comment_id}"),
+            None,
+            &cookie,
+        )
+        .await;
+    assert_eq!(retry.status, StatusCode::OK, "{:?}", retry.body);
+    assert_eq!(retry.body["delivery"]["status"], "sent");
+    assert_eq!(retry.body["comment"]["delivery_status"], "sent");
+    assert!(retry.body["comment"]["delivery_error"].is_null());
+
+    let sends = mock.send_requests();
+    assert_eq!(sends.len(), 2);
+    assert_eq!(sends[1].body["input"]["prompt"], first_prompt);
+    assert_eq!(sends[1].body["input"]["sessionId"], "ses_reply");
+    assert_eq!(sends[1].body["input"]["directory"], "/tmp/kanso-session");
+
+    let detail = app.detail(&cookie, &reference).await;
+    assert_eq!(detail["status"], "blocker");
+    assert_eq!(detail["session_status"], "running");
+    assert_eq!(detail["attention"], false);
+    let kinds: Vec<&str> = detail["activity"]
+        .as_array()
+        .expect("activity")
+        .iter()
+        .filter_map(|entry| entry["kind"].as_str())
+        .collect();
+    assert!(kinds.contains(&"reply_sent"), "{kinds:?}");
+}
+
+#[tokio::test]
+async fn a_transport_failure_marks_delivery_unknown_and_leaves_the_card_alone() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind spare port");
+    let address = listener.local_addr().expect("spare address");
+    drop(listener);
+
+    let app = TestApp::new(Some(&format!("http://{address}"))).await;
+    let cookie = app.login().await;
+    let package = app.create_project(&cookie, "ALP", "Alpha").await;
+    let card = app
+        .create_card(&cookie, package["id"].as_str().expect("id"), "Do it")
+        .await;
+    let reference = card["reference"].as_str().expect("ref");
+    app.post(
+        &format!("/api/tasks/{reference}/session"),
+        Some(json!({
+            "session_id": "ses_reply",
+            "directory": "/tmp/kanso-session",
+            "status": "failed",
+        })),
+        &cookie,
+    )
+    .await;
+    let moved = app
+        .post(
+            &format!("/api/tasks/{reference}/move"),
+            Some(json!({ "status": "blocker", "reason": "Are you there?" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(moved.status, StatusCode::OK, "{:?}", moved.body);
+
+    let response = app
+        .post(
+            &format!("/api/tasks/{reference}/reply"),
+            Some(json!({ "body": "Yes" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::CREATED, "{:?}", response.body);
+    assert_eq!(response.body["delivery"]["status"], "unknown");
+    assert!(response.body["delivery"]["error"]
+        .as_str()
+        .expect("error")
+        .contains("could not reach OpenChamber"));
+    assert_eq!(response.body["comment"]["delivery_status"], "unknown");
+
+    let detail = app.detail(&cookie, reference).await;
+    assert_eq!(detail["status"], "blocker");
+    assert_eq!(detail["session_status"], "failed");
+    let kinds: Vec<&str> = detail["activity"]
+        .as_array()
+        .expect("activity")
+        .iter()
+        .filter_map(|entry| entry["kind"].as_str())
+        .collect();
+    assert!(kinds.contains(&"reply_unknown"), "{kinds:?}");
+    assert!(!kinds.contains(&"reply_sent"), "{kinds:?}");
+}
+
+#[tokio::test]
+async fn reply_requires_a_blocked_card_and_a_session() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "ALP", "Alpha").await;
+    let project_id = project["id"].as_str().expect("id");
+    let card = app.create_card(&cookie, project_id, "Do it").await;
+    let reference = card["reference"].as_str().expect("ref");
+    app.post(
+        &format!("/api/tasks/{reference}/session"),
+        Some(json!({
+            "session_id": "ses_reply",
+            "directory": "/tmp/kanso-session",
+            "status": "running",
+        })),
+        &cookie,
+    )
+    .await;
+
+    let response = app
+        .post(
+            &format!("/api/tasks/{reference}/reply"),
+            Some(json!({ "body": "hello" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::CONFLICT);
+    assert_eq!(response.code(), "not_blocked");
+    assert!(mock.send_requests().is_empty());
+    assert!(app.detail(&cookie, reference).await["comments"]
+        .as_array()
+        .expect("comments")
+        .is_empty());
+
+    let moved = app
+        .post(
+            &format!("/api/tasks/{reference}/move"),
+            Some(json!({ "status": "blocker", "reason": "question" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(moved.status, StatusCode::OK, "{:?}", moved.body);
+    // Clear only this card's session.
+    let task_id = app.detail(&cookie, reference).await["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    app.state
+        .db
+        .call(move |connection| {
+            connection.execute(
+                "UPDATE tasks SET session_id = NULL, session_directory = NULL WHERE id = ?1",
+                [&task_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("clear session");
+
+    let response = app
+        .post(
+            &format!("/api/tasks/{reference}/reply"),
+            Some(json!({ "body": "hello" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::CONFLICT);
+    assert_eq!(response.code(), "no_session");
+    assert_eq!(mock.send_requests().len(), 0);
+}
+
+#[tokio::test]
+async fn reply_is_human_only_and_validates_the_body_before_touching_the_card() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let reference = app.blocked_card(&cookie, "ALP", "question").await;
+
+    let token_response = app
+        .post(
+            "/api/tokens",
+            Some(json!({ "name": "build", "scope": "agent" })),
+            &cookie,
+        )
+        .await;
+    let token = token_response.body["token"].as_str().expect("token");
+    let forbidden = app
+        .post_bearer(
+            &format!("/api/tasks/{reference}/reply"),
+            Some(json!({ "body": "answer" })),
+            token,
+        )
+        .await;
+    assert_eq!(forbidden.status, StatusCode::FORBIDDEN);
+    assert!(mock.send_requests().is_empty());
+
+    for body in [
+        json!({ "body": "   " }),
+        json!({ "body": "x".repeat(16 * 1024 + 1) }),
+    ] {
+        let invalid = app
+            .post(
+                &format!("/api/tasks/{reference}/reply"),
+                Some(body),
+                &cookie,
+            )
+            .await;
+        assert_eq!(
+            invalid.status,
+            StatusCode::BAD_REQUEST,
+            "{:?}",
+            invalid.body
+        );
+        assert_eq!(invalid.code(), "validation");
+    }
+    assert!(mock.send_requests().is_empty());
+}
+
+#[tokio::test]
+async fn reply_is_disabled_with_the_integration_and_rejects_archived_cards() {
+    let app = TestApp::new(None).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "ALP", "Alpha").await;
+    let card = app
+        .create_card(&cookie, project["id"].as_str().expect("id"), "Do it")
+        .await;
+    let reference = card["reference"].as_str().expect("ref");
+    app.post(
+        &format!("/api/tasks/{reference}/session"),
+        Some(json!({
+            "session_id": "ses_reply",
+            "directory": "/tmp/kanso-session",
+            "status": "running",
+        })),
+        &cookie,
+    )
+    .await;
+    app.post(
+        &format!("/api/tasks/{reference}/move"),
+        Some(json!({ "status": "blocker", "reason": "question" })),
+        &cookie,
+    )
+    .await;
+
+    let disabled = app
+        .post(
+            &format!("/api/tasks/{reference}/reply"),
+            Some(json!({ "body": "answer" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(disabled.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(disabled.code(), "integration_disabled");
+    assert!(app.detail(&cookie, reference).await["comments"]
+        .as_array()
+        .expect("comments")
+        .is_empty());
+
+    app.post(&format!("/api/tasks/{reference}/archive"), None, &cookie)
+        .await;
+    let archived = app
+        .post(
+            &format!("/api/tasks/{reference}/reply"),
+            Some(json!({ "body": "answer" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(archived.status, StatusCode::CONFLICT);
+    assert_eq!(archived.code(), "not_active");
+}
+
+#[tokio::test]
+async fn retry_rejects_an_ordinary_comment() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let reference = app.blocked_card(&cookie, "ALP", "question").await;
+    let comment = app
+        .post(
+            &format!("/api/tasks/{reference}/comment"),
+            Some(json!({ "body": "ordinary" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(comment.status, StatusCode::CREATED);
+    let comment_id = comment.body["id"].as_str().expect("comment id");
+
+    let retry = app
+        .post(
+            &format!("/api/tasks/{reference}/reply/{comment_id}"),
+            None,
+            &cookie,
+        )
+        .await;
+    assert_eq!(retry.status, StatusCode::CONFLICT);
+    assert_eq!(retry.code(), "not_a_reply");
+    assert!(mock.send_requests().is_empty());
+}
+
+#[tokio::test]
+async fn board_cards_and_blocked_activity_carry_the_reason() {
+    let (url, _mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let reference = app.blocked_card(&cookie, "ALP", "Which branch?").await;
+
+    let board = app.get("/api/board", &cookie).await;
+    let cards = board.body["projects"][0]["columns"]["blocker"]
+        .as_array()
+        .expect("blocker column");
+    let card = cards
+        .iter()
+        .find(|card| card["reference"] == reference.as_str())
+        .expect("blocked card");
+    assert_eq!(card["blocked_reason"], "Which branch?");
+
+    let detail = app.detail(&cookie, &reference).await;
+    let blocked = detail["activity"]
+        .as_array()
+        .expect("activity")
+        .iter()
+        .find(|entry| entry["kind"] == "blocked")
+        .expect("blocked activity");
+    assert_eq!(blocked["data"]["reason"], "Which branch?");
+
+    let moved = app
+        .post(
+            &format!("/api/tasks/{reference}/move"),
+            Some(json!({ "status": "blocker", "reason": "Use develop only" })),
+            &cookie,
+        )
+        .await;
+    assert_eq!(moved.status, StatusCode::OK, "{:?}", moved.body);
+    let detail = app.detail(&cookie, &reference).await;
+    assert_eq!(detail["blocked_reason"], "Use develop only");
+    let activity = detail["activity"].as_array().expect("activity");
+    let last_moved = activity
+        .iter()
+        .rev()
+        .find(|entry| entry["kind"] == "moved")
+        .expect("moved activity");
+    assert_eq!(last_moved["data"]["reason"], "Use develop only");
 }
 
 // ---------------------------------------------------------------------------
