@@ -18,15 +18,19 @@ given: never create another worktree, change directory, or touch another card.
 3. **Do the work** in the current worktree only.
 4. **Report milestones**, not a transcript. A short `kanso comment ALP-42 "…"`
    when a meaningful piece lands, when you hit a decision, and when you stop.
-5. **Finish in review.** Run `kanso move ALP-42 in_review`, then leave a summary
-   comment with what changed, what you tested, and anything the reviewer needs
-   to know.
+5. **Hand off for human review.** When the work is ready for a human to review,
+   usually after opening a PR/MR, run `kanso move ALP-42 in_review` to move the
+   card to **IN REVIEW**. Leave a summary comment with what changed, what you
+   tested, the PR/MR link if applicable, and anything the human reviewer needs
+   to know. Do not move the card to IN REVIEW for an AI-to-AI review; keep it
+   in progress until it is ready for human review.
 6. **If blocked**, run
    `kanso move ALP-42 blocker --reason "what you need"`. The reason is shown on
    the board; keep it concrete and short (500 characters at most).
 
 ## Rules
 
+- IN REVIEW is reserved for human review, not review between AI agents.
 - Never move a card to `done`. Review and completion are the human's decision.
 - Never delete or archive a card, and never change another card's priority.
 - Ideas discovered along the way go through `kanso propose "Idea" --project ALP
