@@ -142,6 +142,40 @@ cargo test
 
 CI runs the same commands plus a container build.
 
+## Software bills of materials
+
+Two CycloneDX 1.5 JSON SBOMs describe the release:
+
+- `kanso-backend.cdx.json` lists every crate in `Cargo.lock` for the
+  `x86_64-unknown-linux-musl` build.
+- `kanso-frontend.cdx.json` lists the frontend npm dependencies and records the
+  SHA-256 of the vendored `web/vendor/marked.min.js`.
+
+Generate them locally with the same script CI uses:
+
+```sh
+cargo install cargo-cyclonedx --version 0.5.10 --locked
+./scripts/sbom.sh            # writes dist/sbom/*.cdx.json
+./scripts/sbom.sh /tmp/sbom  # or another output directory
+```
+
+Node.js and npm are needed for the frontend document (npm 9.8 or newer provides
+`npm sbom`); no `node_modules` install is required. CI uploads the pair as the
+`kanso-sbom` artifact on every push and pull request, and a `v*` tag attaches
+both files to the GitHub release. The frontend package version in
+`web/package.json` must match `Cargo.toml`; `tests/sbom.rs` enforces that and
+checks the lockfile against the vendored `marked` build.
+
+Scan them with any CycloneDX consumer, for example:
+
+```sh
+grype sbom:dist/sbom/kanso-backend.cdx.json
+trivy sbom dist/sbom/kanso-frontend.cdx.json
+```
+
+`cargo-cyclonedx` honours `SOURCE_DATE_EPOCH`; npm stamps its document with the
+generation time.
+
 ## Container
 
 ```sh
@@ -157,9 +191,10 @@ data in the `/data` volume, exposes port 8087 and probes `/api/health`.
 
 The production image is `ghcr.io/dupremathieu/kanso:latest`; a `v*` git tag
 also publishes that tag and attaches the static
-`kanso-x86_64-unknown-linux-musl` binary to the GitHub release. That asset is a
-bare binary: run it from a source checkout or put the matching `web/` directory
-beside it, since the container image is the self-contained distribution.
+`kanso-x86_64-unknown-linux-musl` binary and both CycloneDX SBOMs to the GitHub
+release. The binary asset is a bare executable: run it from a source checkout
+or put the matching `web/` directory beside it, since the container image is
+the self-contained distribution.
 Production runs as a rootless Podman Quadlet behind host nginx, with a daily
 backup timer. The Quadlet, nginx and app env templates in `deploy/` are rendered
 by `deploy/render.sh` from `deploy/deploy.env` (see

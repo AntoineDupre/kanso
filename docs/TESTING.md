@@ -11,6 +11,10 @@ cargo test --locked
 
 `tests/ui.rs` covers the shell, every module, `i18n/en.js`,
 `vendor/marked.min.js`, content types and the deep-link fallback.
+`tests/sbom.rs` keeps `web/package.json`, `web/package-lock.json` and the
+vendored `marked` build in sync with the crate version. Generate the published
+SBOMs with `./scripts/sbom.sh` (see the README); the script validates both
+documents.
 
 ## Start a clean local instance
 

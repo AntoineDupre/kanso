@@ -32,6 +32,28 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --version 0.5.10 --locked
+      - name: Generate SBOMs
+        run: ./scripts/sbom.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kanso-sbom
+          path: dist/sbom/*.cdx.json
+          if-no-files-found: error
+
   container:
     name: Container
     runs-on: ubuntu-latest

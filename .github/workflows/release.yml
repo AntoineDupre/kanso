@@ -63,6 +63,29 @@ jobs:
           path: kanso-x86_64-unknown-linux-musl
           if-no-files-found: error
 
+  sbom:
+    name: SBOM
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --version 0.5.10 --locked
+      - name: Generate SBOMs
+        run: ./scripts/sbom.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kanso-sbom
+          path: dist/sbom/*.cdx.json
+          if-no-files-found: error
+
   image:
     name: Container image
     needs: verify
@@ -93,7 +116,7 @@ jobs:
 
   release:
     name: GitHub release
-    needs: [musl, image]
+    needs: [musl, image, sbom]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -101,18 +124,23 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: kanso-x86_64-unknown-linux-musl
+      - uses: actions/download-artifact@v4
+        with:
+          name: kanso-sbom
+          path: sbom
       - name: Restore the executable bit
         run: chmod +x kanso-x86_64-unknown-linux-musl
-      - name: Attach the musl binary
+      - name: Attach the musl binary and SBOMs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
+          assets="kanso-x86_64-unknown-linux-musl sbom/kanso-backend.cdx.json sbom/kanso-frontend.cdx.json"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" kanso-x86_64-unknown-linux-musl --clobber
+            gh release upload "$GITHUB_REF_NAME" $assets --clobber
           else
             gh release create "$GITHUB_REF_NAME" \
               --title "$GITHUB_REF_NAME" \
               --generate-notes \
-              kanso-x86_64-unknown-linux-musl
+              $assets
           fi

@@ -1,0 +1,10 @@
+{
+  "name": "kanso-web",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Static ES-module frontend for Kanso",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "marked": "15.0.12"
+  }
+}
