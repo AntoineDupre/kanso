@@ -256,8 +256,16 @@ A project `model`, and a dispatch model override, use the
 `opencode-go/deepseek-v4.1-flash#max`). The optional `#variant` is the
 OpenChamber/OpenCode thinking level. Kanso splits the value and sends `model`
 and `variant` as separate fields, so the `#` never appears in the model id.
-Without `#`, no `variant` is sent. Empty or `null` means no project model; on
-dispatch, an empty override keeps the project value. An invalid model is
+Without `#`, no `variant` is sent. OpenChamber then resolves the level from the
+agent pin, the project or Settings default for the model, the model's last-used
+level, and finally Default, in that order. As a result, omitting `#variant`
+does **not** guarantee the model's Default level: dispatch can inherit a
+previously used level and change as UI history changes. Specify an available
+`#variant` (for example `#low`) to request a particular level. Kanso cannot
+currently force OpenChamber's Default level when no variant is specified.
+
+Empty or `null` means no project model; on dispatch, an empty override keeps
+the project value. An invalid model is
 `422 validation`. A project row written before this validation and holding a
 value that is not `provider/model[#variant]` keeps working until it is used:
 dispatch and the next project save then reject it with the same `422` so it can
