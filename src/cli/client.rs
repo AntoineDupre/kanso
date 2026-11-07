@@ -66,15 +66,22 @@ impl ApiResponse {
 
 impl Client {
     pub fn new(url: &str, token: &str) -> Result<Self, CliError> {
+        Self::configured(url, token, false)
+    }
+
+    fn configured(url: &str, token: &str, secret: bool) -> Result<Self, CliError> {
         let base = config::validate_url(url)?;
         let token = token.trim();
         if token.is_empty() {
             return Err(CliError::usage("token must not be empty"));
         }
-        let config = ureq::Agent::config_builder()
+        let mut builder = ureq::Agent::config_builder()
             .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(30)))
-            .build();
+            .timeout_global(Some(Duration::from_secs(30)));
+        if secret {
+            builder = builder.max_redirects(0);
+        }
+        let config = builder.build();
         Ok(Self {
             agent: config.into(),
             base,
@@ -85,6 +92,12 @@ impl Client {
     pub fn from_config() -> Result<Self, CliError> {
         let (url, token) = config::resolve()?;
         Self::new(&url, &token)
+    }
+
+    /// Secret requests never follow a redirect carrying a capability or value.
+    pub fn secret_from_config() -> Result<Self, CliError> {
+        let (url, token) = config::resolve()?;
+        Self::configured(&url, &token, true)
     }
 
     pub fn request(

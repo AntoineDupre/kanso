@@ -25,6 +25,7 @@ const HEALTH_CACHE_TTL: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
+    pub secrets: Arc<crate::secret_memory::SecretMemory>,
     /// Health-check path; normally the same file as `db`.
     pub db_path: PathBuf,
     pub web_dir: PathBuf,
@@ -60,8 +61,10 @@ impl AppState {
         heartbeat: Duration,
     ) -> Self {
         let db_path = db.path().to_path_buf();
+        let secrets = db.secrets();
         Self {
             db,
+            secrets,
             db_path,
             web_dir,
             auth: Arc::new(auth),

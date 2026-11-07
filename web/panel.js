@@ -71,6 +71,8 @@ export class Panel {
     this.pendingReload = false;
     this.pendingReloadTimer = null;
     this.drafts = new Map();
+    this.secretRequests = [];
+    this.secretLoadFailed = false;
     this.lastRenderedReference = null;
     this.width = options.width || 420;
     this.collapsed = Boolean(options.collapsed);
@@ -160,6 +162,7 @@ export class Panel {
     }
     this.reference = reference;
     this.detail = null;
+    this.secretRequests = [];
     this.editingDescription = false;
     this.editingItem = null;
     this.sessionLinkOpen = false;
@@ -170,6 +173,10 @@ export class Panel {
     try {
       const detail = await api.task(reference);
       if (this.reference !== reference) return;
+      const secrets = detail.status === "blocker" ? await api.secretRequests(reference).catch(() => null) : [];
+      if (this.reference !== reference) return;
+      this.secretLoadFailed = secrets === null;
+      this.secretRequests = secrets || [];
       this.detail = detail;
       this.render({ resetScroll: true });
     } catch (error) {
@@ -186,6 +193,7 @@ export class Panel {
   hide() {
     this.reference = null;
     this.detail = null;
+    this.secretRequests = [];
     this.editingDescription = false;
     this.editingItem = null;
     this.sessionLinkOpen = false;
@@ -263,6 +271,10 @@ export class Panel {
     try {
       const detail = await api.task(reference);
       if (this.reference !== reference) return;
+      const secrets = detail.status === "blocker" ? await api.secretRequests(reference).catch(() => null) : [];
+      if (this.reference !== reference) return;
+      this.secretLoadFailed = secrets === null;
+      this.secretRequests = secrets || [];
       this.detail = detail;
       this.render();
     } catch (error) {
@@ -617,6 +629,7 @@ export class Panel {
     const detail = this.detail;
     const body = el("div", { class: "panel-body" }, [
       this.renderSummary(detail),
+      this.renderSecrets(detail),
       this.renderAgentQuestion(detail),
       this.renderDescription(detail, descriptionDraft),
       this.renderChecklist(detail, itemDraft),
@@ -780,6 +793,7 @@ export class Panel {
 
     const children = [
       question,
+      el("p", { class: "agent-question-warning", text: t("secret.replyWarning") }),
       el("p", {
         class: "muted agent-question-session",
         text: t("panel.sessionStatus", {
@@ -876,6 +890,76 @@ export class Panel {
     }
 
     return this.section(t("panel.agentQuestion"), children, []);
+  }
+
+  renderSecrets(detail) {
+    if (detail.status !== "blocker" || detail.state !== "active") return null;
+    if (this.secretLoadFailed) return this.section(t("secret.title"), [el("p", { text: t("secret.loadFailed") })], []);
+    if (!this.secretRequests.length) return null;
+    const request = this.secretRequests[0];
+    const lines = [
+      el("p", { text: request.label }),
+      el("p", { class: "muted", text: request.purpose }),
+      el("p", { class: "muted", text: t("secret.state", { state: request.state }) }),
+      el("p", { class: "muted", text: t("secret.deadline", { date: new Date(request.deadline).toLocaleString() }) }),
+      request.value_deadline ? el("p", { class: "muted", text: t("secret.valueDeadline", { date: new Date(request.value_deadline).toLocaleString() }) }) : null,
+      request.invalidation_reason === "restart" ? el("p", { class: "agent-question-warning", text: t("secret.restart") }) : null,
+      el("p", { class: "agent-question-warning", text: t("secret.guidance") }),
+      el("p", { class: "muted", text: t("secret.delivery", { status: request.delivery_status || t("secret.notSent") }) })
+    ];
+    if (request.delivery_error) lines.push(el("p", { class: "muted", text: request.delivery_error }));
+    const perform = async (operation, input = null) => {
+      if (this.busy) return;
+      this.busy = true;
+      try {
+        await operation();
+        if (input) input.value = "";
+        this.busy = false;
+        await this.reload({ force: true });
+      } catch {
+        if (input) input.value = "";
+        this.busy = false;
+        // Never display arbitrary upstream error bodies for secret operations.
+        toast(t("secret.operationFailed"), "warning");
+        await this.reload({ force: true });
+      }
+    };
+    const notificationLive = ["ready", "declined"].includes(request.state) &&
+      !request.invalidation_reason && request.deadline > Date.now() &&
+      (!request.value_deadline || request.value_deadline > Date.now());
+    if (this.isHuman() && notificationLive && ["failed", "unknown"].includes(request.delivery_status)) {
+      lines.push(el("button", { type: "button", class: "button button-secondary button-small", text: request.delivery_status === "unknown" ? t("panel.retryAnyway") : t("panel.retry"), onClick: () => perform(() => api.retrySecret(request.id)) }));
+    }
+    if (this.isHuman() && request.state === "waiting") {
+      const field = el("textarea", { class: "input textarea secret-input", rows: "4", autocomplete: "off", spellcheck: "false", "aria-label": t("secret.value"), "data-secret-input": "true" });
+      const mask = el("div", { class: "secret-mask", "aria-hidden": "true" });
+      const wrapper = el("div", { class: "secret-input-wrap" }, [field, mask]);
+      let revealed = false;
+      const updateMask = () => { mask.textContent = Array.from(field.value, (c) => c === "\n" ? "\n" : "•").join(""); };
+      field.addEventListener("input", updateMask);
+      field.addEventListener("scroll", () => { mask.scrollTop = field.scrollTop; mask.scrollLeft = field.scrollLeft; });
+      const reveal = el("button", { type: "button", class: "button button-secondary button-small", text: t("secret.reveal"), "aria-pressed": "false", onClick: () => {
+        revealed = !revealed;
+        wrapper.classList.toggle("revealed", revealed);
+        reveal.setAttribute("aria-pressed", String(revealed));
+        reveal.textContent = t(revealed ? "secret.hide" : "secret.reveal");
+      } });
+      const submit = el("button", { type: "button", class: "button button-primary button-small", text: t("secret.submit"), onClick: () => {
+        if (!field.value) { toast(t("secret.empty"), "warning"); return; }
+        perform(() => api.submitSecret(request.id, field.value), field);
+      } });
+      const explanation = el("textarea", { class: "input textarea", rows: "2", maxlength: "2000", placeholder: t("secret.explanation"), "aria-label": t("secret.explanation") });
+      const decline = el("button", { type: "button", class: "button button-secondary button-small", text: t("secret.decline"), onClick: () => perform(() => api.declineSecret(request.id, explanation.value), field) });
+      lines.push(wrapper, el("div", { class: "form-actions" }, [reveal, submit]), explanation, decline);
+    }
+    if (this.isHuman() && ["waiting", "ready"].includes(request.state)) {
+      lines.push(el("button", { type: "button", class: "button button-secondary button-small", text: t("secret.cancel"), onClick: () => {
+        const field = this.root.querySelector("[data-secret-input]");
+        if (field) field.value = "";
+        perform(() => api.cancelSecret(request.id), field);
+      } }));
+    }
+    return this.section(t("secret.title"), lines, []);
   }
 
   renderLabels(detail) {

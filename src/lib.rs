@@ -10,6 +10,7 @@ pub mod events;
 pub mod fileutil;
 pub mod ids;
 pub mod rank;
+pub mod secret_memory;
 pub mod server;
 pub mod skill;
 pub mod time;

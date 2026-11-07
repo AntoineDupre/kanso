@@ -250,6 +250,61 @@ Network panel.
    or the cookie session returns the dump with `Content-Type: application/json`,
    `Content-Disposition: attachment; …` and `Cache-Control: no-store`.
 
+## One-time secret handoffs (KANSO-11)
+
+Use disposable test credentials, never a real credential, for these checks.
+The full contract and threat model are in `KANSO-11-SPEC.md`.
+
+1. With a linked session on an active in-progress card, run
+   `kanso secret request ALP-42 --label "Test API token" --purpose "Test one command"`.
+   Only the request ID is output (including with `--json`); the card becomes
+   blocked and the browser updates without reloading the entire application.
+2. Open the card. The dedicated Secret request section shows the label,
+   purpose and expiry separately from ordinary replies. Enter a disposable
+   multiline value with leading/trailing whitespace. It is masked by default;
+   Reveal/Hide toggles it without changing the value. Do not put it in comments.
+3. Refresh or close/reopen the panel before submitting: the value must be gone,
+   not restored from drafts or local/session storage. Submit a new test value.
+   Submission removes the input and shows ready/delivery status. The value
+   must not appear in task detail, comments, activity, notifications, SSE,
+   exports, SQLite/WAL/backup files or the OpenChamber conversation.
+4. Run `kanso secret exec REQUEST_ID --env TEST_TOKEN -- COMMAND`. Use a command
+   that verifies equality without printing the environment. Confirm exact
+   whitespace preservation and exit-status propagation, and that a second
+   consume fails. No raw secret file is created. The private capability file
+   is removed. Child failure/launch failure does not permit another retrieval.
+5. Fail the mock OpenChamber send, then submit another test credential. The
+   value remains ready, the UI shows failed/unknown, and Retry/Retry anyway
+   sends only the same reference message. No deadline is extended. Arbitrary
+   upstream error text must never reach the UI, logs or stored delivery error.
+6. Test Decline (optional non-secret explanation), Cancel while waiting/ready,
+   and a fresh request after a terminal request while still blocked. A new
+   ordinary blocker question must prevent that special re-request operation.
+7. Change session, move out of blocker, archive, revoke the requesting token,
+   expire the request, or restart Kanso. Retrieval must fail and the value must
+   disappear. Restart must explicitly explain that a new request is needed.
+   No expiry/cancellation notification should wake the session.
+8. Check private capability directory/file modes (0700/0600), symlink and
+   overwrite rejection, no capability in CLI output/arguments/public metadata,
+   safe behavior after lost/malformed create responses, and request/byte caps.
+
+Automated coverage includes memory-unit limits/concurrency, scheduled expiry,
+backend authorization/lifecycle/notification/non-persistence tests in `m5`, and
+CLI/file/child-execution and UI draft-isolation tests. Interactive checks remain
+important for the multiline mask, reveal, navigation and browser storage.
+
+`scripts/test-secret-ui.mjs` also runs these interactions in real headless
+Chromium against an isolated local Kanso process and a mock OpenChamber (no
+real sessions or credentials). Build with `cargo build --locked` first. With
+Playwright installed in your test tooling, run `node scripts/test-secret-ui.mjs`;
+`PLAYWRIGHT_MODULE` can point to its absolute `index.mjs` if it is installed
+outside this repository. Install its Chromium headless shell with
+`playwright install chromium --only-shell` using that tooling. Set `TMPDIR` to
+your private test cache, and optionally set `KANSO_UI_SCREENSHOT` to a PNG path.
+The test checks desktop/mobile masking, draft/storage isolation, live SSE,
+submission, reference-only notifications, actual CLI environment injection and
+exit status, capability cleanup, decline/cancellation and safe delivery retry.
+
 ## 13. Blocked agent dialog
 
 Setup: OpenChamber is enabled, the card has a linked session (dispatch or

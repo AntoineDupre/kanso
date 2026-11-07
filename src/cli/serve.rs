@@ -48,7 +48,8 @@ async fn serve(port: Option<u16>, data_dir: Option<PathBuf>) -> Result<(), CliEr
             db_path.display()
         ))
     })?;
-    let database = db::Database::from_connection(db_path.clone(), connection);
+    let database = db::Database::from_connection(db_path.clone(), connection)
+        .map_err(|error| startup(error.to_string()))?;
     let auth = AuthConfig::load(
         config.password(),
         config.public_url.as_deref(),
@@ -72,6 +73,7 @@ async fn serve(port: Option<u16>, data_dir: Option<PathBuf>) -> Result<(), CliEr
     );
 
     let mut state = server::AppState::new(database, web_dir, auth);
+    crate::api::secret::spawn_cleanup(state.clone());
     state.openchamber = config.openchamber.as_ref().map(|settings| {
         std::sync::Arc::new(crate::adapter::openchamber::OpenChamber::new(
             settings.url(),

@@ -54,10 +54,20 @@ struct TestServer {
 
 impl TestServer {
     fn start() -> Self {
+        Self::start_with_integration(false)
+    }
+
+    fn start_with_integration(integration: bool) -> Self {
         let dir = TempDir::new();
         let database = Database::open(&dir.path().join("kanso.db")).expect("open database");
         let auth = AuthConfig::load(PASSWORD, None, dir.path()).expect("auth config");
-        let state = AppState::new(database, dir.path().join("web"), auth);
+        let mut state = AppState::new(database, dir.path().join("web"), auth);
+        if integration {
+            state = state.with_openchamber(kanso::adapter::openchamber::OpenChamber::new(
+                "http://127.0.0.1:1",
+                "test",
+            ));
+        }
 
         let (address_tx, address_rx) = std::sync::mpsc::channel();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -309,6 +319,330 @@ fn create_project_and_card(server: &TestServer, human: &str) -> Value {
     let output = command(server, Some(human), &["task", "show", "ALP-1", "--json"]);
     assert_exit(&output, 0);
     json_stdout(&output)
+}
+
+#[cfg(unix)]
+#[test]
+fn secret_cli_private_capability_and_direct_child_execution() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = TestServer::start_with_integration(true);
+    let human = server.create_token("secret-human", "human");
+    let agent = server.create_token("secret-agent", "agent");
+    create_project_and_card(&server, &human);
+    let link = command(
+        &server,
+        Some(&human),
+        &[
+            "session",
+            "link",
+            "ALP-1",
+            "ses_cli",
+            "--directory",
+            "/work",
+        ],
+    );
+    assert_exit(&link, 0);
+    assert_exit(
+        &command(&server, Some(&human), &["move", "ALP-1", "in_progress"]),
+        0,
+    );
+    let rejected = command(
+        &server,
+        Some(&agent),
+        &[
+            "secret",
+            "request",
+            "ALP-1",
+            "--label",
+            "",
+            "--purpose",
+            "test",
+        ],
+    );
+    assert_exit(&rejected, 2);
+    assert_eq!(
+        std::fs::read_dir(server.data_dir().join(".local/state/kanso/secret-handoffs"))
+            .unwrap()
+            .count(),
+        0
+    );
+    let request = command(
+        &server,
+        Some(&agent),
+        &[
+            "secret",
+            "request",
+            "ALP-1",
+            "--label",
+            "API token",
+            "--purpose",
+            "test",
+            "--json",
+        ],
+    );
+    assert_exit(&request, 0);
+    let response = json_stdout(&request);
+    let id = response["id"].as_str().unwrap();
+    assert!(response.get("capability").is_none());
+    let capfile = server
+        .data_dir()
+        .join(".local/state/kanso/secret-handoffs")
+        .join(id);
+    let cap = std::fs::read_to_string(&capfile).unwrap();
+    assert_eq!(
+        std::fs::metadata(&capfile).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(!stdout(&request).contains(&cap) && !stderr(&request).contains(&cap));
+    let value = "secret-test-value";
+    let mut response = api_agent()
+        .post(format!("{}/api/secrets/{id}/submit", server.url()))
+        .header("Authorization", format!("Bearer {human}"))
+        .header("Content-Type", "application/json")
+        .send(json!({"value":value}).to_string())
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body = response.body_mut().read_to_string().unwrap();
+    assert!(!body.contains(value));
+    let invalid = command(
+        &server,
+        Some(&agent),
+        &["secret", "exec", id, "--env", "BAD=NAME", "--", "/bin/true"],
+    );
+    assert_exit(&invalid, 1);
+    assert!(capfile.exists());
+    let output = command(
+        &server,
+        Some(&agent),
+        &[
+            "secret",
+            "exec",
+            id,
+            "--env",
+            "API_TOKEN",
+            "--",
+            "/bin/sh",
+            "-c",
+            "test \"$API_TOKEN\" = secret-test-value || exit 1; exit 7",
+        ],
+    );
+    assert_exit(&output, 7);
+    assert!(!stdout(&output).contains(value) && !stderr(&output).contains(value));
+    assert!(!capfile.exists());
+    std::fs::write(&capfile, &cap).unwrap();
+    let terminal_cancel = command(&server, Some(&agent), &["secret", "cancel", id]);
+    assert_exit(&terminal_cancel, 0);
+    assert!(!capfile.exists());
+    let again = command(
+        &server,
+        Some(&agent),
+        &[
+            "secret",
+            "exec",
+            id,
+            "--env",
+            "API_TOKEN",
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_ne!(again.status.code(), Some(0));
+    let second = command(
+        &server,
+        Some(&agent),
+        &[
+            "secret",
+            "request",
+            "ALP-1",
+            "--label",
+            "Next",
+            "--purpose",
+            "test",
+            "--json",
+        ],
+    );
+    assert_exit(&second, 0);
+    let second_data = json_stdout(&second);
+    let second_id = second_data["id"].as_str().unwrap();
+    let submitted = api_agent()
+        .post(format!("{}/api/secrets/{second_id}/submit", server.url()))
+        .header("Authorization", format!("Bearer {human}"))
+        .header("Content-Type", "application/json")
+        .send(json!({"value":value}).to_string())
+        .unwrap();
+    assert_eq!(submitted.status().as_u16(), 200);
+    let failed = command(
+        &server,
+        Some(&agent),
+        &[
+            "secret",
+            "exec",
+            second_id,
+            "--env",
+            "API_TOKEN",
+            "--",
+            "/bin/true; exit 0",
+        ],
+    );
+    assert_exit(&failed, 2);
+    assert!(!server
+        .data_dir()
+        .join(".local/state/kanso/secret-handoffs")
+        .join(second_id)
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn secret_request_uncertain_creation_retains_usable_private_capability() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener as StdListener;
+    for failure in ["lost", "malformed", "mismatch", "server_error"] {
+        let dir = TempDir::new();
+        let listener = StdListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut expected = None;
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse::<usize>().unwrap();
+                        }
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                if index == 0 {
+                    assert!(first.contains("/api/tasks/ALP-1/secrets"));
+                    tx.send(value.clone()).unwrap();
+                    expected = Some(value["capability"].as_str().unwrap().to_owned());
+                    if failure == "lost" {
+                        continue;
+                    }
+                    let (status, body) = match failure {
+                        "malformed" => ("200 OK", "not json".to_owned()),
+                        "mismatch" => (
+                            "200 OK",
+                            json!({"id":value["id"],"capability":"different"}).to_string(),
+                        ),
+                        _ => ("503 Service Unavailable", "unavailable".to_owned()),
+                    };
+                    write!(stream,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                } else {
+                    assert!(first.contains("/consume"));
+                    assert_eq!(value["capability"].as_str(), expected.as_deref());
+                    let body = json!({"value":"mock-secret"}).to_string();
+                    write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                }
+            }
+        });
+        let run = |args: &[&str]| {
+            Command::new(env!("CARGO_BIN_EXE_kanso"))
+                .args(args)
+                .env("HOME", dir.path())
+                .env("KANSO_URL", &url)
+                .env("KANSO_TOKEN", "kanso_mock")
+                .output()
+                .unwrap()
+        };
+        let request = run(&[
+            "secret",
+            "request",
+            "ALP-1",
+            "--label",
+            "token",
+            "--purpose",
+            "test",
+        ]);
+        assert_exit(&request, 2);
+        let sent = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let id = sent["id"].as_str().unwrap();
+        let cap = sent["capability"].as_str().unwrap();
+        assert!(stderr(&request).contains(id));
+        assert!(
+            stderr(&request).contains("secret status")
+                && stderr(&request).contains("secret cancel")
+        );
+        assert!(!stdout(&request).contains(cap) && !stderr(&request).contains(cap));
+        let path = dir
+            .path()
+            .join(".local/state/kanso/secret-handoffs")
+            .join(id);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), cap);
+        let used = run(&[
+            "secret",
+            "exec",
+            id,
+            "--env",
+            "API_TOKEN",
+            "--",
+            "/bin/sh",
+            "-c",
+            "test \"$API_TOKEN\" = mock-secret",
+        ]);
+        assert_exit(&used, 0);
+        assert!(!path.exists());
+        server.join().unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn secret_cancel_conflict_keeps_capability_when_request_is_live() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new();
+    let id = "12345678-1234-1234-1234-123456789abc";
+    let storage = dir.path().join(".local/state/kanso/secret-handoffs");
+    std::fs::create_dir_all(&storage).unwrap();
+    std::fs::set_permissions(&storage, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file = storage.join(id);
+    std::fs::write(&file, "a".repeat(43)).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        for index in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            let (status, body) = if index == 0 {
+                ("409 Conflict", "{}")
+            } else {
+                ("200 OK", "{\"state\":\"waiting\"}")
+            };
+            write!(stream,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+        }
+    });
+    let output = Command::new(env!("CARGO_BIN_EXE_kanso"))
+        .args(["secret", "cancel", id])
+        .env("HOME", dir.path())
+        .env("KANSO_URL", url)
+        .env("KANSO_TOKEN", "kanso_mock")
+        .output()
+        .unwrap();
+    assert_exit(&output, 3);
+    assert!(file.exists());
+    server.join().unwrap();
 }
 
 #[test]

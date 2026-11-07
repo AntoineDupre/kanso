@@ -44,6 +44,7 @@ Rules:
 - When finished, run `kanso move {{ref}} in_review` and comment a summary.
 - If blocked, run `kanso move {{ref}} blocker --reason \"…\"`.
 - If the card is in blocker, the human's answer arrives as a new message in this session. Continue and move the card out of blocker when you are unblocked; do not poll.
+- To request a credential use `kanso secret request {{ref}} --label \"API token\" --purpose \"Connect to the service\"`; label and purpose are public metadata. Never manually read, print, or store a value or capability, or put either in a prompt, reply, comment, or file. The CLI handles its private capability file. Wait for the notification; do not poll. Use `kanso secret exec REQUEST-ID --env API_TOKEN -- trusted-command` to run a trusted child without printing the secret. The child may leak its environment or output. A consumed or uncertain retrieval requires a new request. Resume the card explicitly when unblocked.
 - Never set the card to done, never delete it, never touch other cards.";
 
 /// One failure from OpenChamber, classified so the API can answer 502 for an

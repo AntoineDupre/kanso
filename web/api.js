@@ -32,7 +32,7 @@ function query(params) {
 
 async function requestResponse(
   path,
-  { method = "GET", body, allowUnauthorized = false, signal } = {}
+  { method = "GET", body, allowUnauthorized = false, signal, secret = false } = {}
 ) {
   const headers = { Accept: "application/json" };
   let payload;
@@ -48,6 +48,7 @@ async function requestResponse(
       headers,
       body: payload,
       credentials: "same-origin",
+      redirect: secret ? "error" : "follow",
       signal
     });
   } catch (error) {
@@ -161,6 +162,12 @@ export const api = {
 
   retryReply: (reference, commentId) =>
     request(`/api/tasks/${enc(reference)}/reply/${enc(commentId)}`, { method: "POST" }),
+
+  secretRequests: (reference) => request(`/api/tasks/${enc(reference)}/secrets`),
+  submitSecret: (id, value) => request(`/api/secrets/${enc(id)}/submit`, { method: "POST", body: { value }, secret: true }),
+  declineSecret: (id, explanation) => request(`/api/secrets/${enc(id)}/decline`, { method: "POST", body: { explanation: explanation || null } }),
+  cancelSecret: (id) => request(`/api/secrets/${enc(id)}/cancel`, { method: "POST" }),
+  retrySecret: (id) => request(`/api/secrets/${enc(id)}/retry`, { method: "POST" }),
 
   addChecklist: (reference, text) =>
     request(`/api/tasks/${enc(reference)}/checklist`, { method: "POST", body: { text } }),

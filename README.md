@@ -436,6 +436,67 @@ Non-`/api` routes serve the static shell from `web/`, with history fallback to
 `index.html` and `{{VERSION}}` replaced by the binary version; a missing asset
 with a file extension returns 404.
 
+## One-time secret handoffs
+
+An agent with a linked, in-progress card can request one value with
+`kanso secret request ALP-42 --label "API token" --purpose "Connect to the API"`.
+Label and purpose are public metadata: never put credentials in them, comments,
+or ordinary replies. The human enters the value in the dedicated blocker panel.
+Use `kanso secret status <request-id>` to inspect metadata, or
+`kanso secret cancel <request-id>` to cancel. After submission, execute directly:
+
+```sh
+kanso secret exec <request-id> --env API_TOKEN -- my-command --option
+```
+
+The capability is stored under `~/.local/state/kanso/secret-handoffs` in a
+private directory and file; the submitted value is never stored there. Retrieval
+is one-time, before the child starts: if the response is lost, the CLI crashes,
+the command fails to start, or it exits unsuccessfully, request another value.
+The CLI does not start a shell unless explicitly asked. The child inherits normal
+streams and can disclose its environment or print the value; use trusted commands.
+Sessions sharing an agent token and OS user share a trust domain. Server memory,
+swap, crash dumps, privileged users and compromised processes are not protected
+by the application-level no-persistence guarantee. Use HTTPS except on loopback.
+Submission and decline notify the originally linked session with a request ID,
+never a value or capability. Failed/unknown notifications can be retried without
+replaying the value or extending expiry; inspect the displayed delivery status.
+The agent still owns moving the card out of blocker. Expiry/cancellation does
+not send a wake-up message.
+
+The CLI saves its capability before creating the server request. If creation
+returns an uncertain result, it reports the public request ID and retains that
+capability: inspect or cancel that ID as instructed, without retrying creation
+automatically. A confirmed rejection removes the local capability.
+
+Kanso holds submitted values only in volatile memory: never in SQLite, backups,
+history, saved prompts, SSE or exports. Requests expire after 24 hours; submitted
+values after 15 minutes or the request deadline. Restart, session changes,
+leaving blocker, archiving or token revocation invalidate retrieval. Limits are
+one live request per card, 100 globally, 1 MiB of submitted bytes and 16 KiB per
+value. UTF-8 whitespace/newlines are preserved; empty values and NUL are rejected.
+There is no reusable vault, binary upload or plaintext credential-file mode.
+
+| Method | Route | Access / body |
+| --- | --- | --- |
+| `POST` | `/api/tasks/:ref/secrets` | Agent token; `{label,purpose,id?,capability?}`. Optional private provisioning fields must be paired. Returns `{id,capability}` once; CLI prints only `id`. |
+| `GET` | `/api/tasks/:ref/secrets` | Authenticated; metadata history, latest first |
+| `GET` | `/api/secrets/:id` | Authenticated; metadata only |
+| `POST` | `/api/secrets/:id/submit` | Human only; `{value}`; returns status and safe delivery classification, never echoes the value |
+| `POST` | `/api/secrets/:id/decline` | Human only; `{explanation?}`; non-secret explanation |
+| `POST` | `/api/secrets/:id/cancel` | Human or original agent token; closes waiting/ready requests |
+| `POST` | `/api/secrets/:id/consume` | Original agent token plus `{capability}`; returns `{value}` at most once; intended only for the private CLI execution path |
+| `POST` | `/api/secrets/:id/retry` | Human only; retries stored reference-only notification while valid |
+
+`secret.updated` contains only `task_id` and `request_id`; `task.updated` carries
+the refreshed task. The UI's multiline value input is masked/revealable and is
+never a saved draft. Ordinary replies remain separate and warn against entering
+credentials. See [the confirmed design](docs/KANSO-11-SPEC.md),
+[security decisions](docs/DECISIONS.md#one-time-secret-handoffs-kanso-11) and
+[test scenarios](docs/TESTING.md#one-time-secret-handoffs-kanso-11).
+
+![Dedicated masked secret input](docs/screenshots/kanso-11/dialog.png)
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).

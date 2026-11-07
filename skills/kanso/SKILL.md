@@ -44,6 +44,21 @@ given: never create another worktree, change directory, or touch another card.
 
 ## Command shapes
 
+For a credential, do not ask the human to put it in a reply, comment, prompt,
+or file, and do not manually read, print, or store the value or retrieval
+capability; the CLI handles its private capability file. On an
+in-progress card with a linked session, use `kanso secret request ALP-42 --label
+"API token" --purpose "Connect to the service"`. Label and purpose are public:
+never put credentials in them. The request moves the card to blocker. Wait for
+the session notification; do not poll. After submission, use `kanso secret exec
+REQUEST-ID --env API_TOKEN -- trusted-command` to inject it directly into a
+child. The child can leak its environment or output; choose a trusted command.
+It is consumed before launch: on a lost response, launch failure or failed
+command, request a new handoff. `kanso secret status REQUEST-ID` inspects only
+metadata and `kanso secret cancel REQUEST-ID` cancels it. If creation's outcome
+is unknown, follow its public-ID inspect/cancel instructions; do not retry
+creation automatically. Resume the card explicitly when unblocked.
+
 ```sh
 kanso next [--project ALP] [--claim] [--agent NAME]
 kanso task show ALP-42
@@ -65,7 +80,8 @@ kanso session link ALP-42 ses_… --directory /path/to/worktree
 `--agent NAME` replaces the token name in comments, activity and `created_by`
 for that command. Use it when the token is shared between agent roles.
 
-Add `--json` to any command to print the API's own JSON for scripts.
+Add `--json` to commands for machine-readable output. Secret requests print only
+the public request ID, never the capability.
 
 ## Exit codes
 

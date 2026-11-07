@@ -7,6 +7,7 @@ mod client;
 mod commands;
 mod config;
 mod output;
+mod secret;
 mod serve;
 
 /// Kanso: a single-user kanban board.
@@ -22,6 +23,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Request and use a one-time secret handoff.
+    Secret {
+        #[command(subcommand)]
+        command: SecretCommand,
+    },
     /// Run the Kanso HTTP server.
     Serve {
         /// TCP port to listen on (overrides the port in KANSO_BIND).
@@ -148,6 +154,30 @@ pub enum Command {
         /// Server-side directory under the data directory.
         #[arg(long)]
         out: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SecretCommand {
+    /// Request a secret; label and purpose are public metadata.
+    Request {
+        reference: String,
+        #[arg(long)]
+        label: String,
+        #[arg(long)]
+        purpose: String,
+    },
+    /// Inspect public handoff metadata.
+    Status { request: String },
+    /// Cancel a handoff.
+    Cancel { request: String },
+    /// Consume once and directly run a child with an environment variable.
+    Exec {
+        request: String,
+        #[arg(long)]
+        env: String,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
     },
 }
 
@@ -303,6 +333,7 @@ impl MoveTarget {
 /// A CLI failure, with the exit code PLAN §6 assigns to its class.
 #[derive(Debug)]
 pub enum CliError {
+    Child(u8),
     /// Bad arguments, missing configuration or a start-up failure: 1.
     Usage(String),
     /// The server answered with an error status.
@@ -322,6 +353,7 @@ pub enum CliError {
 impl CliError {
     pub fn exit_code(&self) -> u8 {
         match self {
+            Self::Child(code) => *code,
             Self::Usage(_) | Self::Startup(_) => 1,
             // PLAN §6 groups every conflict, including a rate-limited request,
             // as exit 3; all other API failures are 2.
@@ -331,6 +363,9 @@ impl CliError {
     }
 
     pub fn print(&self) {
+        if matches!(self, Self::Child(_)) {
+            return;
+        }
         output::error_line(format_args!("kanso: {self}"));
     }
 
@@ -342,6 +377,7 @@ impl CliError {
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Child(code) => write!(f, "child exited with status {code}"),
             Self::Usage(message) => write!(f, "usage: {message}"),
             Self::Api { code, message, .. } => write!(f, "{code}: {message}"),
             Self::Network(message) => write!(f, "network: {message}"),
@@ -361,6 +397,7 @@ impl From<CliError> for std::process::ExitCode {
 pub fn run(cli: Cli) -> Result<(), CliError> {
     let Cli { json, command } = cli;
     let result = match command {
+        Command::Secret { command } => secret::run(command, json),
         Command::Serve { port, data_dir } => serve::run(port, data_dir),
         Command::Config { command } => commands::config(command, json),
         Command::Project { command } => commands::project(command, json),

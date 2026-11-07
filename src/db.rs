@@ -1,16 +1,20 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use crate::error::{Error, Result};
+
+type SecretChanges = Mutex<HashSet<(String, String)>>;
 
 /// Versioned schema migrations. Index + 1 is the `PRAGMA user_version` value.
 pub const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v1.sql"),
     include_str!("migrations/v2.sql"),
     include_str!("migrations/v3.sql"),
+    include_str!("migrations/v4.sql"),
 ];
 
 /// Open the database and apply the connection-level pragmas.
@@ -48,6 +52,8 @@ pub fn migrate(connection: &mut Connection) -> Result<u32> {
 pub struct Database {
     path: PathBuf,
     connection: Arc<Mutex<Connection>>,
+    secrets: Arc<crate::secret_memory::SecretMemory>,
+    secret_changes: Arc<SecretChanges>,
 }
 
 impl Database {
@@ -55,18 +61,30 @@ impl Database {
     pub fn open(path: &Path) -> Result<Self> {
         let mut connection = open(path)?;
         migrate(&mut connection)?;
-        Ok(Self {
-            path: path.to_path_buf(),
-            connection: Arc::new(Mutex::new(connection)),
-        })
+        Self::from_connection(path.to_path_buf(), connection)
     }
 
     /// Wrap an already opened and migrated connection.
-    pub fn from_connection(path: PathBuf, connection: Connection) -> Self {
-        Self {
+    pub fn from_connection(path: PathBuf, connection: Connection) -> Result<Self> {
+        connection.execute("UPDATE secret_requests SET state = 'invalidated', verifier = NULL, invalidation_reason = 'restart' WHERE state IN ('waiting', 'ready')", [])?;
+        Ok(Self {
             path,
             connection: Arc::new(Mutex::new(connection)),
-        }
+            secrets: Arc::new(crate::secret_memory::SecretMemory::default()),
+            secret_changes: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        })
+    }
+
+    pub fn secrets(&self) -> Arc<crate::secret_memory::SecretMemory> {
+        Arc::clone(&self.secrets)
+    }
+
+    pub(crate) fn take_secret_changes(&self) -> Vec<(String, String)> {
+        self.secret_changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .drain()
+            .collect()
     }
 
     pub fn path(&self) -> &Path {
@@ -83,13 +101,84 @@ impl Database {
         T: Send + 'static,
     {
         let connection = Arc::clone(&self.connection);
+        let secrets = Arc::clone(&self.secrets);
+        let secret_changes = Arc::clone(&self.secret_changes);
         tokio::task::spawn_blocking(move || {
             let mut connection = connection.lock().unwrap_or_else(|error| error.into_inner());
-            operation(&mut connection)
+            // The same connection lock serializes cleanup with all task/token changes.
+            cleanup_secrets(&connection, &secrets, &secret_changes)?;
+            let result = operation(&mut connection);
+            let cleanup = cleanup_secrets(&connection, &secrets, &secret_changes);
+            match result {
+                Err(error) => Err(error),
+                Ok(value) => {
+                    cleanup?;
+                    Ok(value)
+                }
+            }
         })
         .await
         .map_err(|error| Error::msg(format!("database worker failed: {error}")))?
     }
+}
+
+/// Called only while holding the serialized connection lock. Database triggers
+/// close requests when cards/tokens change; remove their volatile values before
+/// releasing that same lock to another operation.
+fn cleanup_secrets(
+    connection: &Connection,
+    secrets: &crate::secret_memory::SecretMemory,
+    changes: &SecretChanges,
+) -> Result<()> {
+    let mut expired = connection.prepare(
+        "UPDATE secret_requests SET state='expired',verifier=NULL
+         WHERE state IN ('waiting','ready')
+           AND (deadline<=?1 OR (value_deadline IS NOT NULL AND value_deadline<=?1))
+         RETURNING id,task_id",
+    )?;
+    let mut changed = expired
+        .query_map([crate::api::now_millis()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+
+    let mut statement =
+        connection.prepare("SELECT id FROM secret_requests WHERE state IN ('waiting','ready')")?;
+    let live = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    for id in secrets.retain_live(&live) {
+        if let Some(task_id) = connection
+            .query_row(
+                "SELECT task_id FROM secret_requests WHERE id=?1",
+                [&id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            changed.insert((id, task_id));
+        }
+    }
+    for id in secrets.expire(std::time::Instant::now()) {
+        // Monotonic expiry remains authoritative if the wall clock moves back;
+        // never leave a phantom ready handoff with no retrievable value.
+        if let Some(task_id) = connection
+            .query_row(
+                "UPDATE secret_requests SET state='expired',verifier=NULL
+             WHERE id=?1 AND state IN ('waiting','ready') RETURNING task_id",
+                [&id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            changed.insert((id, task_id));
+        }
+    }
+    changes
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .extend(changed);
+    Ok(())
 }
 
 fn apply(connection: &mut Connection, migrations: &[&str]) -> Result<u32> {
@@ -175,7 +264,7 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("read user_version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
 
         let mut statement = connection
             .prepare(
@@ -198,6 +287,7 @@ mod tests {
                 "dependencies",
                 "labels",
                 "projects",
+                "secret_requests",
                 "task_labels",
                 "tasks",
                 "tokens",
@@ -236,13 +326,13 @@ mod tests {
         let path = dir.path().join("kanso.db");
         let mut connection = open(&path).expect("open database");
 
-        assert_eq!(migrate(&mut connection).expect("first migration"), 3);
-        assert_eq!(migrate(&mut connection).expect("second migration"), 3);
+        assert_eq!(migrate(&mut connection).expect("first migration"), 4);
+        assert_eq!(migrate(&mut connection).expect("second migration"), 4);
 
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("read user_version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -267,7 +357,7 @@ mod tests {
             )
             .expect("seed v1 rows");
 
-        assert_eq!(migrate(&mut connection).expect("migrate to v3"), 3);
+        assert_eq!(migrate(&mut connection).expect("migrate to v4"), 4);
 
         let mut statement = connection
             .prepare("PRAGMA index_info('checklist_task')")
@@ -321,7 +411,7 @@ mod tests {
             )
             .expect("seed v2 rows");
 
-        assert_eq!(migrate(&mut connection).expect("migrate to v3"), 3);
+        assert_eq!(migrate(&mut connection).expect("migrate to v4"), 4);
 
         let mut statement = connection
             .prepare("PRAGMA table_info('comments')")

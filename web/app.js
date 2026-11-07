@@ -50,6 +50,7 @@ const EVENT_TYPES = [
   "project.archived",
   "comment.created",
   "comment.updated",
+  "secret.updated",
   "checklist.created",
   "checklist.updated",
   "checklist.deleted",
@@ -2133,6 +2134,10 @@ function panelNeedsRefresh(taskId, changedDependencies = null) {
 }
 
 function applyEvent(type, data) {
+  if (type === "secret.updated") {
+    if (state.panel && state.panel.currentTaskId === data.task_id) state.panel.reload({ force: true });
+    return;
+  }
   const task = data.task || null;
   let oldState = null;
   if (task && type !== "proposal.accepted") oldState = state.previousCards.get(task.id) || null;

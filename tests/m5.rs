@@ -595,6 +595,596 @@ impl TestApp {
 // ---------------------------------------------------------------------------
 // Config and integration
 
+async fn secret_fixture(url: &str) -> (TestApp, String, String, String, Value) {
+    let app = TestApp::new(Some(url)).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "HND", "Handoffs").await;
+    let card = app
+        .create_card(&cookie, project["id"].as_str().unwrap(), "Use a credential")
+        .await;
+    let reference = card["reference"].as_str().unwrap().to_owned();
+    let linked = app
+        .post(
+            &format!("/api/tasks/{reference}/session"),
+            Some(json!({"session_id":"ses_handoff","directory":"/work","status":"waiting"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(linked.status, StatusCode::OK);
+    let moved = app
+        .post(
+            &format!("/api/tasks/{reference}/move"),
+            Some(json!({"status":"in_progress"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(moved.status, StatusCode::OK);
+    let token = app
+        .post(
+            "/api/tokens",
+            Some(json!({"name":"handoff-agent","scope":"agent"})),
+            &cookie,
+        )
+        .await
+        .body["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let created = app
+        .post_bearer(
+            &format!("/api/tasks/{reference}/secrets"),
+            Some(json!({"label":"API credential","purpose":"Authenticate one command"})),
+            &token,
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::OK, "{:?}", created.body);
+    (app, cookie, reference, token, created.body)
+}
+
+#[tokio::test]
+async fn secret_notification_retry_is_reference_only_and_does_not_extend_expiry() {
+    let (url, mock) = start_mock().await;
+    let (app, cookie, reference, agent, created) = secret_fixture(&url).await;
+    let id = created["id"].as_str().unwrap();
+    let capability = created["capability"].as_str().unwrap();
+    let value = "sentinel_credential_NEVER_PERSIST_61853";
+    let mut events = app.state.events.subscribe();
+    mock.set_send(
+        500,
+        json!({"error":format!("upstream echoed {value} {capability}")}),
+    );
+    let submitted = app
+        .post(
+            &format!("/api/secrets/{id}/submit"),
+            Some(json!({"value":value})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(submitted.status, StatusCode::OK);
+    assert_eq!(submitted.body["delivery_status"], "failed");
+    assert_eq!(submitted.headers[header::CACHE_CONTROL], "no-store");
+    assert!(!submitted.body.to_string().contains(value));
+    assert!(!submitted.body.to_string().contains(capability));
+    let before = app.get(&format!("/api/secrets/{id}"), &cookie).await.body;
+    let retry_url = format!("/api/secrets/{id}/retry");
+    assert_eq!(
+        app.post_bearer(&retry_url, None, &agent).await.status,
+        StatusCode::FORBIDDEN
+    );
+    mock.set_send(200, json!({"promptDispatched":true}));
+    let retried = app.post(&retry_url, None, &cookie).await;
+    assert_eq!(retried.status, StatusCode::OK);
+    assert_eq!(retried.body["status"], "sent");
+    assert_eq!(
+        app.post(&retry_url, None, &cookie).await.status,
+        StatusCode::CONFLICT
+    );
+    let after = app.get(&format!("/api/secrets/{id}"), &cookie).await.body;
+    assert_eq!(before["deadline"], after["deadline"]);
+    assert_eq!(before["value_deadline"], after["value_deadline"]);
+    assert_eq!(after["state"], "ready");
+    let mut saw_secret_event = false;
+    while let Ok(event) = events.try_recv() {
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(!serialized.contains(value) && !serialized.contains(capability));
+        saw_secret_event |= event.kind == "secret.updated";
+    }
+    assert!(saw_secret_event);
+    let sends = mock.send_requests();
+    assert_eq!(sends.len(), 2);
+    assert_eq!(sends[0].body, sends[1].body);
+    let prompt = sends[0].body["input"]["prompt"].as_str().unwrap();
+    assert!(prompt.contains(id) && prompt.contains(&reference));
+    assert!(!prompt.contains(value) && !prompt.contains(capability));
+    let detail = app.detail(&cookie, &reference).await;
+    assert_eq!(detail["status"], "blocker");
+    assert_eq!(detail["session_status"], "running");
+    let export = app.get("/api/export.json", &cookie).await.body.to_string();
+    for public in [
+        detail.to_string(),
+        export,
+        after.to_string(),
+        submitted.body.to_string(),
+    ] {
+        assert!(!public.contains(value));
+        assert!(!public.contains(capability));
+    }
+    let backup = app.post("/api/backup", None, &cookie).await;
+    assert_eq!(backup.status, StatusCode::OK, "{:?}", backup.body);
+    for path in [
+        app.state.db.path().to_path_buf(),
+        PathBuf::from(format!("{}-wal", app.state.db.path().display())),
+        PathBuf::from(backup.body["path"].as_str().unwrap()),
+    ] {
+        let bytes = std::fs::read(path).unwrap();
+        for forbidden in [value, capability] {
+            assert!(!bytes
+                .windows(forbidden.len())
+                .any(|w| w == forbidden.as_bytes()));
+        }
+    }
+    let consumed = app
+        .post_bearer(
+            &format!("/api/secrets/{id}/consume"),
+            Some(json!({"capability":capability})),
+            &agent,
+        )
+        .await;
+    assert_eq!(consumed.status, StatusCode::OK);
+    assert_eq!(consumed.body["value"], value);
+    assert_eq!(
+        app.post(&retry_url, None, &cookie).await.status,
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn secret_decline_replacement_cancellation_and_ordinary_question_guard() {
+    let (url, mock) = start_mock().await;
+    let (app, cookie, reference, agent, created) = secret_fixture(&url).await;
+    let id = created["id"].as_str().unwrap();
+    let declined = app
+        .post(
+            &format!("/api/secrets/{id}/decline"),
+            Some(json!({"explanation":"Cannot grant access"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(declined.status, StatusCode::OK);
+    assert_eq!(declined.body["delivery_status"], "sent");
+    assert_eq!(mock.send_requests().len(), 1);
+    let create_url = format!("/api/tasks/{reference}/secrets");
+    let replacement = app
+        .post_bearer(
+            &create_url,
+            Some(json!({"label":"Replacement","purpose":"Try a different credential"})),
+            &agent,
+        )
+        .await;
+    assert_eq!(replacement.status, StatusCode::OK, "{:?}", replacement.body);
+    assert_ne!(replacement.body["id"], created["id"]);
+    assert_ne!(replacement.body["capability"], created["capability"]);
+    // A new request also prevents replay of the preceding decline message.
+    assert_eq!(
+        app.post(&format!("/api/secrets/{id}/retry"), None, &cookie)
+            .await
+            .status,
+        StatusCode::CONFLICT
+    );
+    let next_id = replacement.body["id"].as_str().unwrap();
+    assert_eq!(
+        app.post_bearer(&format!("/api/secrets/{next_id}/cancel"), None, &agent)
+            .await
+            .status,
+        StatusCode::OK
+    );
+    let question = app
+        .post(
+            &format!("/api/tasks/{reference}/move"),
+            Some(json!({"status":"blocker","reason":"An unrelated ordinary question"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(question.status, StatusCode::OK);
+    assert_eq!(
+        app.post_bearer(
+            &create_url,
+            Some(json!({"label":"Not allowed","purpose":"Do not overwrite the question"})),
+            &agent
+        )
+        .await
+        .status,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        app.detail(&cookie, &reference).await["blocked_reason"],
+        "An unrelated ordinary question"
+    );
+}
+
+#[tokio::test]
+async fn secret_ready_value_is_removed_on_leave_archive_and_token_revocation() {
+    for mutation in ["leave", "archive", "revoke"] {
+        let (app, cookie, reference, agent, created) = secret_fixture("http://127.0.0.1:1").await;
+        let id = created["id"].as_str().unwrap();
+        let capability = created["capability"].as_str().unwrap();
+        assert_eq!(
+            app.post(
+                &format!("/api/secrets/{id}/submit"),
+                Some(json!({"value":"lifecycle-sentinel"})),
+                &cookie
+            )
+            .await
+            .status,
+            StatusCode::OK
+        );
+        match mutation {
+            "leave" => {
+                assert_eq!(
+                    app.post(
+                        &format!("/api/tasks/{reference}/move"),
+                        Some(json!({"status":"in_progress"})),
+                        &cookie
+                    )
+                    .await
+                    .status,
+                    StatusCode::OK
+                );
+            }
+            "archive" => {
+                assert_eq!(
+                    app.post(&format!("/api/tasks/{reference}/archive"), None, &cookie)
+                        .await
+                        .status,
+                    StatusCode::OK
+                );
+            }
+            "revoke" => {
+                let token_id = app
+                    .state
+                    .db
+                    .call(|db| {
+                        Ok(db.query_row(
+                            "SELECT id FROM tokens WHERE name='handoff-agent'",
+                            [],
+                            |row| row.get::<_, String>(0),
+                        )?)
+                    })
+                    .await
+                    .unwrap();
+                let revoked = app
+                    .request(
+                        Method::DELETE,
+                        &format!("/api/tokens/{token_id}"),
+                        None,
+                        Some(&cookie),
+                        Some(ORIGIN),
+                    )
+                    .await;
+                assert_eq!(revoked.status, StatusCode::NO_CONTENT);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            app.get(&format!("/api/secrets/{id}"), &cookie).await.body["state"],
+            "invalidated"
+        );
+        assert!(matches!(
+            app.state.secrets.take(id, std::time::Instant::now()),
+            Err(kanso::secret_memory::StoreError::NotFound)
+        ));
+        let rejected = app
+            .post_bearer(
+                &format!("/api/secrets/{id}/consume"),
+                Some(json!({"capability":capability})),
+                &agent,
+            )
+            .await;
+        assert_eq!(
+            rejected.status,
+            if mutation == "revoke" {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::CONFLICT
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn secret_handoff_authorization_atomic_consume_and_nonpersistence() {
+    let app = TestApp::new(Some("http://127.0.0.1:1")).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "SEC", "Secrets").await;
+    let card = app
+        .create_card(&cookie, project["id"].as_str().unwrap(), "Handoff")
+        .await;
+    let reference = card["reference"].as_str().unwrap();
+    assert_eq!(
+        app.post(
+            &format!("/api/tasks/{reference}/session"),
+            Some(json!({"session_id":"ses_secret","directory":"/work","status":"running"})),
+            &cookie
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.post(
+            &format!("/api/tasks/{reference}/move"),
+            Some(json!({"status":"in_progress"})),
+            &cookie
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let agent = app
+        .post(
+            "/api/tokens",
+            Some(json!({"name":"secret-agent","scope":"agent"})),
+            &cookie,
+        )
+        .await
+        .body["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let other = app
+        .post(
+            "/api/tokens",
+            Some(json!({"name":"other-agent","scope":"agent"})),
+            &cookie,
+        )
+        .await
+        .body["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let created = app
+        .post_bearer(
+            &format!("/api/tasks/{reference}/secrets"),
+            Some(json!({"label":"API token","purpose":"connect"})),
+            &agent,
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::OK, "{:?}", created.body);
+    let id = created.body["id"].as_str().unwrap();
+    let capability = created.body["capability"].as_str().unwrap();
+    assert_eq!(app.detail(&cookie, reference).await["status"], "blocker");
+    assert_eq!(
+        app.post_bearer(
+            &format!("/api/tasks/{reference}/secrets"),
+            Some(json!({"label":"another","purpose":"test"})),
+            &agent
+        )
+        .await
+        .status,
+        StatusCode::CONFLICT
+    );
+    let value = " secret\nsecond line\n ";
+    let submit = format!("/api/secrets/{id}/submit");
+    assert_eq!(
+        app.post_bearer(&submit, Some(json!({"value":value})), &agent)
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.request(
+            Method::POST,
+            &submit,
+            Some(json!({"value":value})),
+            Some(&cookie),
+            Some("https://evil.example")
+        )
+        .await
+        .status,
+        StatusCode::FORBIDDEN
+    );
+    for invalid in [
+        String::new(),
+        "bad\0value".to_owned(),
+        "x".repeat(16 * 1024 + 1),
+    ] {
+        let rejected = app
+            .post(&submit, Some(json!({"value":invalid})), &cookie)
+            .await;
+        assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
+        assert!(!rejected.body.to_string().contains("bad\\u0000value"));
+    }
+    assert_eq!(
+        app.post(&submit, Some(json!({"value":value})), &cookie)
+            .await
+            .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.post(&submit, Some(json!({"value":"replacement"})), &cookie)
+            .await
+            .status,
+        StatusCode::CONFLICT
+    );
+    let consume = format!("/api/secrets/{id}/consume");
+    assert_eq!(
+        app.post_bearer(&consume, Some(json!({"capability":capability})), &other)
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.post_bearer(&consume, Some(json!({"capability":"wrong"})), &agent)
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+    let detail = app.detail(&cookie, reference).await.to_string();
+    assert!(!detail.contains(value) && !detail.contains(capability));
+    let bytes = std::fs::read(app.state.db.path()).unwrap();
+    assert!(!bytes.windows(value.len()).any(|x| x == value.as_bytes()));
+    assert!(!bytes
+        .windows(capability.len())
+        .any(|x| x == capability.as_bytes()));
+    let (a, b) = tokio::join!(
+        app.post_bearer(&consume, Some(json!({"capability":capability})), &agent),
+        app.post_bearer(&consume, Some(json!({"capability":capability})), &agent)
+    );
+    let successes = [a, b]
+        .into_iter()
+        .filter(|r| r.status == StatusCode::OK)
+        .collect::<Vec<_>>();
+    assert_eq!(successes.len(), 1);
+    assert_eq!(successes[0].body["value"], value);
+}
+
+#[tokio::test]
+async fn secret_handoffs_invalidate_on_session_change_expiry_and_restart() {
+    let app = TestApp::new(Some("http://127.0.0.1:1")).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "LIF", "Lifecycle").await;
+    let card = app
+        .create_card(&cookie, project["id"].as_str().unwrap(), "Handoff")
+        .await;
+    let reference = card["reference"].as_str().unwrap();
+    let move_url = format!("/api/tasks/{reference}/move");
+    let link_url = format!("/api/tasks/{reference}/session");
+    let create_url = format!("/api/tasks/{reference}/secrets");
+    assert_eq!(
+        app.post(
+            &link_url,
+            Some(json!({"session_id":"ses_one","directory":"/work","status":"running"})),
+            &cookie
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.post(&move_url, Some(json!({"status":"in_progress"})), &cookie)
+            .await
+            .status,
+        StatusCode::OK
+    );
+    let agent = app
+        .post(
+            "/api/tokens",
+            Some(json!({"name":"agent-life","scope":"agent"})),
+            &cookie,
+        )
+        .await
+        .body["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let make = || {
+        app.post_bearer(
+            &create_url,
+            Some(json!({"label":"token","purpose":"test"})),
+            &agent,
+        )
+    };
+    let first = make().await.body;
+    let first_id = first["id"].as_str().unwrap();
+    assert_eq!(
+        app.post(
+            &format!("/api/secrets/{first_id}/submit"),
+            Some(json!({"value":"first secret"})),
+            &cookie
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.post(
+            &link_url,
+            Some(json!({"session_id":"ses_two","directory":"/work","status":"running"})),
+            &cookie
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.get(&format!("/api/secrets/{first_id}"), &cookie)
+            .await
+            .body["state"],
+        "invalidated"
+    );
+    assert_eq!(
+        app.post_bearer(
+            &format!("/api/secrets/{first_id}/consume"),
+            Some(json!({"capability":first["capability"]})),
+            &agent
+        )
+        .await
+        .status,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        app.post(&move_url, Some(json!({"status":"in_progress"})), &cookie)
+            .await
+            .status,
+        StatusCode::OK
+    );
+    let second = make().await.body;
+    let second_id = second["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        app.post(
+            &format!("/api/secrets/{second_id}/submit"),
+            Some(json!({"value":"second secret"})),
+            &cookie
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let expire_id = second_id.clone();
+    app.state
+        .db
+        .call(move |db| {
+            db.execute(
+                "UPDATE secret_requests SET value_deadline=0 WHERE id=?1",
+                [expire_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        app.get(&format!("/api/secrets/{second_id}"), &cookie)
+            .await
+            .body["state"],
+        "expired"
+    );
+    let third = make().await.body;
+    let third_id = third["id"].as_str().unwrap();
+    assert_eq!(
+        app.post(
+            &format!("/api/secrets/{third_id}/submit"),
+            Some(json!({"value":"third secret"})),
+            &cookie
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let restarted = Database::open(app.state.db.path()).unwrap();
+    let id = third_id.to_owned();
+    let status = restarted
+        .call(move |db| {
+            Ok(
+                db.query_row("SELECT state FROM secret_requests WHERE id=?1", [id], |r| {
+                    r.get::<_, String>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(status, "invalidated");
+}
+
 #[tokio::test]
 async fn disabled_integration_reports_so_and_refuses_dispatch() {
     let app = TestApp::new(None).await;

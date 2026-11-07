@@ -30,6 +30,27 @@ const MODULES: [&str; 10] = [
     "/vendor/marked.min.js",
 ];
 
+#[test]
+fn secret_input_is_separate_from_drafts_and_refreshes_on_secret_events() {
+    let panel = std::fs::read_to_string(repository_web_dir().join("panel.js")).unwrap();
+    let section = panel
+        .split("  renderSecrets(detail) {")
+        .nth(1)
+        .unwrap()
+        .split("  renderLabels(detail) {")
+        .next()
+        .unwrap();
+    assert!(section.contains("data-secret-input"));
+    assert!(!section.contains("data-draft"));
+    assert!(!section.contains("localStorage"));
+    assert!(!section.contains("sessionStorage"));
+    assert!(section.contains("field.value = \"\""));
+    assert!(section.contains("api.retrySecret"));
+    let app = std::fs::read_to_string(repository_web_dir().join("app.js")).unwrap();
+    assert!(app.contains("\"secret.updated\""));
+    assert!(app.contains("state.panel.reload({ force: true })"));
+}
+
 struct TempDir {
     path: PathBuf,
 }

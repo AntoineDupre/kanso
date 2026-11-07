@@ -147,6 +147,49 @@ Verified against OpenChamber 2.6.0. Where §9 assumes a state this version does 
 - The wrapper is stored verbatim in `reply_prompt` and names the reply comment id. Retrying with `POST /api/tasks/:ref/reply/:comment_id` reuses that prompt, the stored session id and directory, making the second send byte-identical; the id lets the agent ignore a duplicate after an `unknown` retry. A reply already `sent` is `409 already_sent`, and an ordinary comment is `409 not_a_reply`. Retry only requires the card to stay active: the card may have left `blocker` in the meantime. The three attempt kinds are `reply_sent`, `reply_failed` and `reply_unknown`, each carrying `comment_id`, `session_id` and, on failure, `error`; retries publish `comment.updated` instead of `comment.created`.
 - The panel keeps the send box after a reply for follow-ups, shows the last delivery result (a "Last reply sent" line, or a failed/unknown banner with **Retry** / **Retry anyway**), and puts the same badge and retry control on the comment itself so it stays reachable after the card leaves `blocker`. A busy session is allowed (the prompt queues); `failed`/`offline` are allowed with a warning. The draft is cleared once the comment exists, even when delivery failed, so pressing send again does not duplicate the text. With no session or a disabled integration the panel explains why and shows no send box.
 
+## One-time secret handoffs (KANSO-11)
+
+- The confirmed design and acceptance criteria are in `KANSO-11-SPEC.md`.
+  Kanso is not a vault: submitted values live only in process memory. Migration
+  v4 stores request metadata, a capability verifier and reference-only delivery
+  prompts, never the value or raw capability. Restart invalidates all live
+  requests. SQLite backups and exports cannot restore a secret.
+- The requesting agent token and a random private capability authorize one
+  consume operation. A linked session ID is only a consistency check. Shared
+  tokens and same-OS-user sessions remain a single trust domain. The CLI
+  provisions a private capability before creating the blocker, so an uncertain
+  create response still leaves a known request ID and a local capability.
+- Database triggers invalidate handoffs on session/card/token changes. Every
+  database call cleans invalidated/expired volatile entries before releasing
+  the same serialized connection lock used by submission and consumption.
+  At-most-once consumption commits before the value leaves the server; lost
+  responses, launch errors and failed children require a new request.
+- Waiting requests expire after 24 hours; accepted values after 15 minutes or
+  the request deadline, whichever comes first. A deadline-driven background
+  worker reschedules when a shorter deadline is added. Wall-clock checks and
+  monotonic deadlines both reject expiry; timing/erasure is best effort under
+  OS scheduling, not a hard real-time or hardened memory guarantee. There are
+  at most 100 live requests and 1 MiB of submitted bytes; each value is at most
+  16 KiB UTF-8, non-empty, with NUL rejected and whitespace preserved.
+- Human-only submit/decline uses a dedicated UI, not a comment. Notifications
+  send only a request ID and outcome to the recorded session; failed/unknown
+  retries reuse that exact safe prompt without extending expiry. Upstream
+  error bodies are discarded in favor of constant messages. `secret.updated`
+  carries only task/request IDs; `task.updated` refreshes the board. The agent
+  still owns leaving blocker. Expiry and cancellation do not wake the agent.
+- The CLI directly runs a command with one named environment variable. It
+  never prints the value or writes a credential file. Commands can still leak
+  environment/output; this is not a sandbox or automatic redaction. Capability
+  files are a separate credential, stored outside the repository in a private
+  per-user directory, and removed on consumption/cancellation/known expiry.
+  Secret-bearing CLI traffic never follows HTTP redirects, and API responses
+  use `Cache-Control: no-store`.
+- The UI masks multiline text with a bullet-only overlay and an explicit
+  reveal control. Values are absent from panel drafts/browser storage, cleared
+  after actions, and discarded on refresh. Ordinary replies remain separate
+  and warn against including credentials. No binary uploads, reusable vault,
+  file-secret mode or multi-instance coordination is included.
+
 ## SBOMs
 
 - Both documents are CycloneDX 1.5 JSON. `cargo-cyclonedx` 0.5.10 produces `kanso-backend.cdx.json`; npm's built-in `npm sbom` produces `kanso-frontend.cdx.json` from `web/package-lock.json`. CI uploads both as the `kanso-sbom` artifact on every push and pull request, and the release job attaches them to the GitHub release. They are generated artefacts and stay out of git; `dist/` is already ignored.

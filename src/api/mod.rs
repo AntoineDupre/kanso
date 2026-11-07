@@ -36,6 +36,7 @@ mod labels;
 pub(crate) mod model;
 mod projects;
 mod reply;
+pub(crate) mod secret;
 mod session;
 pub(crate) mod tasks;
 mod tokens;
@@ -411,6 +412,16 @@ pub fn routes() -> Router<AppState> {
         .route("/api/tasks/{reference}/comment", post(comments::create))
         .route("/api/tasks/{reference}/reply", post(reply::create))
         .route(
+            "/api/tasks/{reference}/secrets",
+            post(secret::create).get(secret::list),
+        )
+        .route("/api/secrets/{id}", get(secret::status))
+        .route("/api/secrets/{id}/submit", post(secret::submit))
+        .route("/api/secrets/{id}/consume", post(secret::consume))
+        .route("/api/secrets/{id}/cancel", post(secret::cancel))
+        .route("/api/secrets/{id}/decline", post(secret::decline))
+        .route("/api/secrets/{id}/retry", post(secret::retry))
+        .route(
             "/api/tasks/{reference}/reply/{comment_id}",
             post(reply::retry),
         )
@@ -428,6 +439,14 @@ pub fn routes() -> Router<AppState> {
         .route("/api/tokens/{id}", axum::routing::delete(tokens::revoke))
         .route("/api/export.json", get(export::download))
         .route("/api/backup", post(backup::create))
+        .layer(axum::middleware::map_response(no_store))
+}
+
+async fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 /// Double-option field: absent -> `None`, `null` -> `Some(None)`, value ->

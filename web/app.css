@@ -2272,3 +2272,10 @@ body.resizing-panel * {
     max-height: calc(100dvh - 20px);
   }
 }
+/* The secret textarea is never a draft. Its mask contains bullets only. */
+.secret-input-wrap { position: relative; background: var(--surface); border-radius: 8px; }
+.secret-input-wrap .secret-input { color: transparent; caret-color: var(--text); position: relative; z-index: 1; background: transparent; }
+.secret-input-wrap:not(.revealed) .secret-input::selection { color: transparent; }
+.secret-mask { position: absolute; inset: 0; padding: 8px 10px; white-space: pre-wrap; overflow: hidden; overflow-wrap: anywhere; pointer-events: none; z-index: 2; color: var(--text); font: inherit; line-height: 1.45; }
+.secret-input-wrap.revealed .secret-input { color: var(--text); }
+.secret-input-wrap.revealed .secret-mask { display: none; }
