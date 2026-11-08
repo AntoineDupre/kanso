@@ -18,7 +18,9 @@ use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use kanso::adapter::openchamber::OpenChamber;
+use kanso::adapter::openchamber::{
+    render_prompt, OpenChamber, PromptValues, DEFAULT_PROMPT_TEMPLATE,
+};
 use kanso::adapter::poller::Poller;
 use kanso::auth::AuthConfig;
 use kanso::db::Database;
@@ -1703,7 +1705,15 @@ async fn dispatch_sends_the_exact_payload_stores_the_session_and_enables_auto_ac
             "input": {
                 "directory": "/home/mathieu/code/alpha",
                 "title": "ALP-1 — Fix the flux capacitor",
-                "prompt": "Card ALP-1: Fix the flux capacitor\nProject Alpha\nDetails\nline 2\nUnknown {{nope}}",
+                "prompt": format!(
+                    "Card ALP-1: Fix the flux capacitor\nProject Alpha\nDetails\nline 2\nUnknown {{{{nope}}}}\n\n{}",
+                    render_prompt(DEFAULT_PROMPT_TEMPLATE, &PromptValues {
+                        reference: "ALP-1",
+                        title: "Fix the flux capacitor",
+                        project: "Alpha",
+                        description: "Details\nline 2",
+                    })
+                ),
                 "agent": "plan",
                 "model": "openai/gpt-5",
                 "worktree": "kanso/ALP-1-fix-the-flux-capacitor",

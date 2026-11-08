@@ -795,6 +795,7 @@ pub fn parse_model(raw: &str) -> Result<Option<ModelSpec>, String> {
 /// An explicit dispatch selection wins over the project setting. The effective
 /// model is split so OpenChamber receives `model` and `variant` separately; a
 /// value without `#` sends no `variant` at all.
+/// Project prompt text comes first; the built-in template is always appended.
 pub fn build_session_create(
     project: &Project,
     task: &Task,
@@ -804,9 +805,9 @@ pub fn build_session_create(
         .prompt_template
         .as_deref()
         .filter(|template| !template.trim().is_empty())
-        .unwrap_or(DEFAULT_PROMPT_TEMPLATE);
+        .map(|template| format!("{template}\n\n{DEFAULT_PROMPT_TEMPLATE}"));
     let prompt = render_prompt(
-        template,
+        template.as_deref().unwrap_or(DEFAULT_PROMPT_TEMPLATE),
         &PromptValues {
             reference: &task.reference,
             title: &task.title,
@@ -1025,7 +1026,18 @@ mod tests {
         assert_eq!(input["startRef"], "develop");
         assert_eq!(
             input["prompt"],
-            "Card ALP-42 — Fix it\nAlpha\nSome details."
+            format!(
+                "Card ALP-42 — Fix it\nAlpha\nSome details.\n\n{}",
+                render_prompt(
+                    DEFAULT_PROMPT_TEMPLATE,
+                    &PromptValues {
+                        reference: "ALP-42",
+                        title: "Fix it",
+                        project: "Alpha",
+                        description: "Some details.",
+                    },
+                )
+            )
         );
     }
 
@@ -1035,13 +1047,18 @@ mod tests {
         project.agent = Some("   ".to_owned());
         project.model = Some(String::new());
         project.base_branch = Some(String::new());
-        project.prompt_template = Some("   ".to_owned());
         let payload = build_session_create(&project, &task("Fix it"), None).expect("payload");
         let input = &payload["input"];
         assert_eq!(input["agent"], "build");
         assert_eq!(input["startRef"], "main");
         assert!(input.get("model").is_none());
         assert!(input["prompt"].as_str().expect("prompt").contains("Rules:"));
+        for template in ["", "   ", "\n\t"] {
+            project.prompt_template = Some(template.to_owned());
+            let blank_payload =
+                build_session_create(&project, &task("Fix it"), None).expect("payload");
+            assert_eq!(blank_payload["input"]["prompt"], input["prompt"]);
+        }
     }
 
     #[test]
