@@ -1701,6 +1701,7 @@ export class Panel {
                 reference: detail.reference,
                 agent: (project.agent || "").trim() || "build",
                 model: (project.model || "").trim(),
+                worktree: Boolean(project.worktree),
                 onSubmit: async (selection) => {
                   try {
                     const updated = await api.dispatchTask(detail.reference, selection);

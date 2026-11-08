@@ -220,6 +220,7 @@ export const messages = {
   "panel.dispatchAgentHint": "Leave empty to use the project agent.",
   "panel.dispatchModel": "Model",
   "panel.dispatchModelHint": "provider/model#variant: the optional variant sets the thinking level (for example #max). Without it, OpenChamber may use a configured or last-used level instead of Default. Leave empty to use the project model.",
+  "panel.dispatchWorktreeHint": "Applies only to this dispatch; the project setting is unchanged.",
   "panel.unknownActor": "Unknown",
   "panel.createdAt": "Created {when}",
   "panel.updatedAt": "Updated {when}",

@@ -305,7 +305,7 @@ be corrected.
 | `POST` | `/api/tasks/:ref/claim` | Human or agent; sets `claimed_by`, status → `in_progress` |
 | `POST` | `/api/tasks/:ref/release` | Clears the claim, keeps the column |
 | `POST` | `/api/tasks/:ref/session` | Human only; `{session_id,directory,status?}` with status `running` by default (also `idle`, `waiting`, `failed`, `offline`) |
-| `POST` | `/api/tasks/:ref/dispatch` | Human only; optional `{agent?,model?}`; creates an OpenChamber session/worktree for the card when the adapter is enabled |
+| `POST` | `/api/tasks/:ref/dispatch` | Human only; optional `{agent?,model?,worktree?}` overrides; creates an OpenChamber session for the card when the adapter is enabled. `worktree` is a boolean defaulting to the project setting. |
 | `POST` | `/api/tasks/:ref/reply` | Human only; `{body}`; records the answer as a comment and forwards it into the card's OpenChamber session |
 | `POST` | `/api/tasks/:ref/reply/:comment_id` | Human only; retries a failed or unknown reply with the stored prompt and session |
 | `POST` | `/api/tasks/:ref/dependencies` | `{blocked_by:[ref,…]}` replaces the set; `[]` clears it (human only) |

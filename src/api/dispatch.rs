@@ -24,6 +24,8 @@ pub struct DispatchBody {
     agent: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    worktree: Option<bool>,
 }
 
 enum Loaded {
@@ -80,6 +82,7 @@ pub async fn dispatch(
             .model
             .map(|model| model.trim().to_owned())
             .filter(|model| !model.is_empty()),
+        worktree: supplied.worktree,
     };
     if let Some(agent) = selection.agent.as_deref() {
         if agent.chars().count() > MAX_DISPATCH_AGENT_CHARS {

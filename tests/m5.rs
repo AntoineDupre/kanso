@@ -1757,6 +1757,50 @@ async fn dispatch_sends_the_exact_payload_stores_the_session_and_enables_auto_ac
 }
 
 #[tokio::test]
+async fn dispatch_worktree_override_is_per_dispatch_and_defaults_to_project() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "ALP", "Alpha").await;
+    let project_id = project["id"].as_str().expect("id");
+
+    for (default, override_value, expected) in [
+        (true, Some(false), false),
+        (false, Some(true), true),
+        (true, None, true),
+        (false, None, false),
+    ] {
+        let patched = app
+            .patch(
+                &format!("/api/projects/{project_id}"),
+                json!({ "repo_path": "/home/me/code/alpha", "worktree": default }),
+                &cookie,
+            )
+            .await;
+        assert_eq!(patched.status, StatusCode::OK);
+        let card = app.create_card(&cookie, project_id, "Do it").await;
+        let reference = card["reference"].as_str().expect("ref");
+        let body = override_value.map(|value| json!({ "worktree": value }));
+        let response = app
+            .post(&format!("/api/tasks/{reference}/dispatch"), body, &cookie)
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+        let creates = mock.create_requests();
+        let input = &creates.last().expect("create request").body["input"];
+        if expected {
+            assert_eq!(input["worktree"], format!("kanso/{reference}-do-it"));
+        } else {
+            assert_eq!(input["worktree"], false);
+        }
+        let project = app
+            .get(&format!("/api/projects/{project_id}"), &cookie)
+            .await;
+        assert_eq!(project.status, StatusCode::OK);
+        assert_eq!(project.body["worktree"], default);
+    }
+}
+
+#[tokio::test]
 async fn dispatch_body_overrides_agent_and_model_with_variant() {
     let (url, mock) = start_mock().await;
     let app = TestApp::new(Some(&url)).await;

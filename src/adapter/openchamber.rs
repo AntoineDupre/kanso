@@ -720,12 +720,12 @@ pub struct ModelSpec {
     pub variant: Option<String>,
 }
 
-/// Agent and model overrides typed at dispatch. `None` or an empty value means
-/// "inherit the project setting".
+/// Dispatch overrides. `None` or an empty string inherits the project setting.
 #[derive(Clone, Debug, Default)]
 pub struct DispatchSelection {
     pub agent: Option<String>,
     pub model: Option<String>,
+    pub worktree: Option<bool>,
 }
 
 impl DispatchSelection {
@@ -856,7 +856,10 @@ pub fn build_session_create(
     }
     input.insert(
         "worktree".to_owned(),
-        if project.worktree {
+        if selection
+            .and_then(|selection| selection.worktree)
+            .unwrap_or(project.worktree)
+        {
             json!(branch)
         } else {
             json!(false)
@@ -1127,6 +1130,7 @@ mod tests {
         let selection = DispatchSelection {
             agent: None,
             model: Some("anthropic/claude#high".to_owned()),
+            ..Default::default()
         };
         let payload =
             build_session_create(&project, &task("Fix it"), Some(&selection)).expect("payload");
@@ -1142,6 +1146,7 @@ mod tests {
         let selection = DispatchSelection {
             agent: None,
             model: Some("other/model".to_owned()),
+            ..Default::default()
         };
         let payload =
             build_session_create(&project, &task("Fix it"), Some(&selection)).expect("payload");
@@ -1157,6 +1162,7 @@ mod tests {
         let blank = DispatchSelection {
             agent: Some("  ".to_owned()),
             model: None,
+            ..Default::default()
         };
         let payload =
             build_session_create(&project, &task("Fix it"), Some(&blank)).expect("payload");
@@ -1165,6 +1171,7 @@ mod tests {
         let override_agent = DispatchSelection {
             agent: Some("review".to_owned()),
             model: None,
+            ..Default::default()
         };
         let payload = build_session_create(&project, &task("Fix it"), Some(&override_agent))
             .expect("payload");
@@ -1185,6 +1192,7 @@ mod tests {
         let selection = DispatchSelection {
             agent: None,
             model: Some("also-bad".to_owned()),
+            ..Default::default()
         };
         assert!(build_session_create(&project, &task("Fix it"), Some(&selection)).is_err());
     }

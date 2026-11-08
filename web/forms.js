@@ -144,7 +144,7 @@ export function confirmDialog(message, { title = "", confirmLabel = t("common.de
   });
 }
 
-export function openDispatchDialog({ reference, agent = "", model = "", onSubmit }) {
+export function openDispatchDialog({ reference, agent = "", model = "", worktree = true, onSubmit }) {
   const agentInput = el("input", {
     class: "input",
     type: "text",
@@ -159,6 +159,7 @@ export function openDispatchDialog({ reference, agent = "", model = "", onSubmit
     value: model,
     placeholder: t("form.exampleModel")
   });
+  const worktreeInput = el("input", { type: "checkbox", checked: worktree });
   const error = formError();
   const cancel = el("button", {
     type: "button",
@@ -174,6 +175,7 @@ export function openDispatchDialog({ reference, agent = "", model = "", onSubmit
     el("p", { class: "modal-message", text: t("panel.dispatchNote", { ref: reference }) }),
     field(t("panel.dispatchAgent"), agentInput, t("panel.dispatchAgentHint")),
     field(t("panel.dispatchModel"), modelInput, t("panel.dispatchModelHint")),
+    field(t("form.worktree"), worktreeInput, t("panel.dispatchWorktreeHint")),
     error,
     el("div", { class: "form-actions" }, [cancel, submit])
   ]);
@@ -187,7 +189,8 @@ export function openDispatchDialog({ reference, agent = "", model = "", onSubmit
     try {
       await onSubmit({
         agent: agentInput.value.trim(),
-        model: modelInput.value.trim()
+        model: modelInput.value.trim(),
+        worktree: worktreeInput.checked
       });
       modal.close();
     } catch (failure) {
