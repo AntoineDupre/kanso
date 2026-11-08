@@ -444,12 +444,14 @@ every 10 s for cards with a `session_id` not in a terminal state:
 | OpenChamber state | Kanso |
 | --- | --- |
 | `busy` / `retry` | `session_status=running`, card stays `in_progress` |
-| `idle` + last message completed | `session_status=idle`, card → `in_review` |
+| `idle` | `session_status=idle`, card stays `in_progress`; the agent moves it to `in_review` explicitly when the work is ready |
 | `idle` + failed | `session_status=failed`, `attention=1`, card stays |
 | `waiting-permission` / `waiting-question` | `session_status=waiting`, `attention=1` |
 | unreachable (3 failures) | `session_status=offline`, `attention=1` |
 
-Never automatic `done`. Auto-transitions are recorded in the activity log.
+Idle is the end of an assistant turn, not the end of the work: it never moves a
+card. Never automatic `done`. Session transitions are recorded in the activity
+log.
 
 **Prompt template** (default, overridable per project):
 
@@ -573,7 +575,7 @@ as text).
 | M2 | Board API + SSE + rank/move/blocker/dependencies/proposals | move and blocker round-trip tests pass |
 | M3 | Web UI: board, panel B, drag & drop, create/edit, filters, global view, inbox | manual checklist passes on desktop + mobile widths |
 | M4 | CLI + skill file | CLI test suite passes; an agent can complete a card end to end via CLI |
-| M5 | OpenChamber adapter (dispatch + polling), settings screen | one real card dispatched into a worktree, auto-moved to review |
+| M5 | OpenChamber adapter (dispatch + polling), settings screen | one real card dispatched into a worktree, moved to review by the agent |
 | M6 | Deployment artefacts: quadlet, nginx, backup timer, GitHub Actions, docs | image published, unit running, TLS URL healthy, backup restores |
 | M7 | Polish: notifications, export screen, keyboard help, README screenshots | reviewed and documented |
 

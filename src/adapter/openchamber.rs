@@ -489,7 +489,8 @@ pub struct SessionSummary {
 pub enum MappedStatus {
     /// Session is running; the card stays where it is.
     Running,
-    /// Session finished successfully.
+    /// Session is idle; only its status is recorded, the card stays where it
+    /// is. The agent moves it to review explicitly once the work is ready.
     Idle,
     /// Session finished unsuccessfully or never really ran; the card stays and
     /// asks for attention.

@@ -20,7 +20,6 @@ use crate::api::model::Task;
 use crate::api::now_millis;
 use crate::api::tasks::{insert_activity, task_by_ref, task_detail};
 use crate::error::{Error, Result};
-use crate::rank;
 use crate::server::AppState;
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -256,50 +255,25 @@ impl Poller {
                     return Ok(None);
                 }
 
-                let from = current.status.clone();
-                let mut moved = false;
-                if current.state == "active" && current.status == "in_progress" {
-                    let max_rank: Option<f64> = transaction.query_row(
-                        "SELECT MAX(rank) FROM tasks
-                         WHERE project_id = ?1 AND status = 'in_review' AND state = 'active'",
-                        [&current.project_id],
-                        |row| row.get(0),
-                    )?;
-                    let rank = rank::append(max_rank);
-                    let changed = transaction.execute(
-                        "UPDATE tasks
-                         SET status = 'in_review', rank = ?1, session_status = 'idle', updated_at = ?2
-                         WHERE id = ?3 AND status = 'in_progress' AND session_id = ?4",
-                        params![rank, now, current.id, card.session_id],
-                    )?;
-                    moved = changed > 0;
+                // Idle is the end of an assistant turn, not the end of the
+                // work: the agent may have stopped to ask a question or wait
+                // for a reply. Only record the session state; the agent (or
+                // the human) moves the card to review explicitly.
+                let changed = transaction.execute(
+                    "UPDATE tasks SET session_status = 'idle', updated_at = ?1
+                     WHERE id = ?2 AND session_id = ?3 AND session_status <> 'idle'",
+                    params![now, current.id, card.session_id],
+                )?;
+                if changed == 0 {
+                    return Ok(None);
                 }
 
-                if !moved {
-                    let changed = transaction.execute(
-                        "UPDATE tasks SET session_status = 'idle', updated_at = ?1
-                         WHERE id = ?2 AND session_id = ?3 AND session_status <> 'idle'",
-                        params![now, current.id, card.session_id],
-                    )?;
-                    if changed == 0 {
-                        return Ok(None);
-                    }
-                }
-
-                let to = if moved {
-                    "in_review".to_owned()
-                } else {
-                    from.clone()
-                };
-                let kind = if moved { "auto_moved" } else { "session_idle" };
                 insert_activity(
                     &transaction,
                     &current.id,
                     "openchamber",
-                    kind,
+                    "session_idle",
                     &json!({
-                        "from": from,
-                        "to": to,
                         "session_id": card.session_id,
                         "session_status": "idle",
                     }),

@@ -431,7 +431,7 @@ Every task mutation writes an `activity` row (`created`, `proposed`, `updated`,
 `dependencies_changed`, `commented`, `reply_sent`, `reply_failed`,
 `reply_unknown`, `checklist_added`, `checklist_updated`,
 `checklist_removed`, `label_added`, `label_removed`, `session_linked`,
-`dispatched`, `auto_moved`, `session_idle`, `session_failed`,
+`dispatched`, `session_idle`, `session_failed`,
 `session_offline`, `session_running`, `permission_auto_accept_failed`,
 `dispatch_abandoned`, `archived`, `restored`)
 with a small JSON `data` payload. `blocked` carries the `reason`, and a `moved`

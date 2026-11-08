@@ -2794,7 +2794,7 @@ async fn linked_card(app: &TestApp, cookie: &str, key: &str) -> (String, String)
 }
 
 #[tokio::test]
-async fn poller_moves_a_busy_then_idle_session_to_review() {
+async fn poller_keeps_a_busy_then_idle_session_in_progress() {
     let (url, mock) = start_mock().await;
     let app = TestApp::new(Some(&url)).await;
     let cookie = app.login().await;
@@ -2837,14 +2837,15 @@ async fn poller_moves_a_busy_then_idle_session_to_review() {
     app.poll().await;
     let detail = app.detail(&cookie, &reference).await;
     assert_eq!(detail["session_status"], "idle");
-    assert_eq!(detail["status"], "in_review");
+    assert_eq!(detail["status"], "in_progress");
     let kinds: Vec<&str> = detail["activity"]
         .as_array()
         .expect("activity")
         .iter()
         .filter_map(|entry| entry["kind"].as_str())
         .collect();
-    assert!(kinds.contains(&"auto_moved"), "{kinds:?}");
+    assert!(kinds.contains(&"session_idle"), "{kinds:?}");
+    assert!(!kinds.contains(&"auto_moved"), "{kinds:?}");
 
     // Idle is terminal: another cycle does not touch the card again.
     let activity_count = detail["activity"].as_array().expect("activity").len();
