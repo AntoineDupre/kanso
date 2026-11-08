@@ -1,6 +1,6 @@
 name: Release
 
-# Tag-driven release: only this workflow runs for v* tags (ci.yml ignores tags).
+# Tag-driven release: CI runs only for pull requests.
 on:
   push:
     tags:
