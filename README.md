@@ -507,6 +507,12 @@ credentials. See [the confirmed design](docs/KANSO-11-SPEC.md),
 
 ![Dedicated masked secret input](docs/screenshots/kanso-11/dialog.png)
 
+## Security
+
+Report vulnerabilities privately through GitHub's **Report a vulnerability**
+button on the [Security tab](https://github.com/dupremathieu/kanso/security/advisories/new);
+read [SECURITY.md](SECURITY.md) for scope, expectations and what not to include.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
