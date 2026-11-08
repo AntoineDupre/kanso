@@ -7,7 +7,35 @@ step. Run the automated checks first:
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
+node tests/imports_ui.mjs
 ```
+
+## External task imports
+
+Production currently registers no cloud providers (the GitHub adapter belongs
+to KANSO-2). Open **Imports** from a project's toolbar: it must explain that
+provider support is not yet available without offering a working import button.
+`tests/api.rs` exercises the real API using an injected, test-only provider;
+`tests/imports_ui.mjs` covers selection, safe links, in-flight state, errors,
+and invalidation without browser dependencies and runs in CI.
+
+For an optional real Chromium check, build the binary and install Playwright
+in your external test tooling, then run:
+
+```sh
+cargo build --locked
+node scripts/test-imports-ui.mjs
+# Or set PLAYWRIGHT_MODULE to an installed Playwright index.mjs.
+```
+
+This uses disposable local data under `~/.cache/tmp/opencode`, disables the
+OpenChamber integration, and intercepts fixture-provider responses only inside
+the test browser. No live credential or production provider is required. It
+checks the real empty state and mocked preview/confirmation UI on desktop and
+mobile, including unsafe text/links, duplicate-safe retry results, filter
+invalidation, and provider errors. Set `KANSO_IMPORTS_SCREENSHOTS=dist/review`
+to retain desktop/mobile screenshots. The mocked browser flow complements,
+but does not replace, the Rust API tests.
 
 `tests/ui.rs` covers the shell, every module, `i18n/en.js`,
 `vendor/marked.min.js`, content types and the deep-link fallback.

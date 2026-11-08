@@ -7,7 +7,7 @@ use serde::Serialize;
 use super::model::{
     ChecklistItem, Comment, Dependencies, Label, Project, Task, PROJECT_COLUMNS, TASK_COLUMNS,
 };
-use super::tasks::{load_checklist, load_dependencies, load_labels};
+use super::tasks::{load_checklist, load_dependencies, load_labels, load_provenance};
 use super::{now_millis, require_human, ApiError, Auth};
 use crate::server::AppState;
 use crate::time;
@@ -21,6 +21,7 @@ struct ExportTask {
     task: Task,
     checklist: Vec<ChecklistItem>,
     dependencies: Dependencies,
+    provenance: Option<super::model::Provenance>,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,6 +88,7 @@ fn load_export(connection: &mut rusqlite::Connection) -> crate::error::Result<Ex
         export_tasks.push(ExportTask {
             checklist: load_checklist(connection, &task.id)?,
             dependencies: load_dependencies(connection, &task.id)?,
+            provenance: load_provenance(connection, &task.id)?,
             task,
         });
     }

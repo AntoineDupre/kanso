@@ -2,6 +2,7 @@
 // dependencies, activity and lifecycle actions.
 
 import { t } from "./i18n/index.js";
+import { sourceLink } from "./imports.js";
 import { api } from "./api.js";
 import {
   el,
@@ -631,6 +632,10 @@ export class Panel {
       this.renderSummary(detail),
       this.renderSecrets(detail),
       this.renderAgentQuestion(detail),
+      detail.provenance ? this.section(t("imports.provenance"), [
+        el("p", { text: `${detail.provenance.provider} · ${detail.provenance.kind}` }),
+        sourceLink(detail.provenance.source_url)
+      ]) : null,
       this.renderDescription(detail, descriptionDraft),
       this.renderChecklist(detail, itemDraft),
       this.renderComments(detail),

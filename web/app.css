@@ -1515,6 +1515,29 @@ body.resizing-panel * {
   min-width: 0;
 }
 
+.imports-page .field {
+  max-width: 560px;
+  margin-bottom: 12px;
+}
+
+.imports-page {
+  overflow-wrap: anywhere;
+}
+
+.imports-page .settings-list {
+  margin-bottom: 12px;
+}
+
+.import-candidate {
+  align-items: flex-start;
+  overflow-wrap: anywhere;
+}
+
+.import-candidate input[type="checkbox"] {
+  flex: none;
+  margin-top: 4px;
+}
+
 .settings-row-title {
   display: flex;
   align-items: center;

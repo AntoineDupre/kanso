@@ -2,6 +2,7 @@
   "name": "kanso-web",
   "version": "0.5.0",
   "private": true,
+  "type": "module",
   "description": "Static ES-module frontend for Kanso",
   "license": "Apache-2.0",
   "dependencies": {

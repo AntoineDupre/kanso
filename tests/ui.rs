@@ -17,12 +17,13 @@ static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Every asset the shell needs, with its expected content type exercised by the
 /// serving test. New web modules must be added here.
-const MODULES: [&str; 10] = [
+const MODULES: [&str; 11] = [
     "/app.css",
     "/app.js",
     "/api.js",
     "/board.js",
     "/panel.js",
+    "/imports.js",
     "/forms.js",
     "/dom.js",
     "/i18n/en.js",
@@ -229,6 +230,7 @@ async fn deep_links_serve_the_shell() {
         "/",
         "/global",
         "/inbox",
+        "/imports",
         "/settings/projects",
         "/settings/tokens",
         "/settings/integration",

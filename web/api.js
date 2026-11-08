@@ -115,6 +115,10 @@ export const api = {
 
   integration: () => request("/api/integration").catch(() => null),
 
+  importProviders: () => request("/api/imports/providers"),
+  importPreview: (payload) => request("/api/imports/preview", { method: "POST", body: payload }),
+  importConfirm: (payload) => request("/api/imports/confirm", { method: "POST", body: payload }),
+
   projects: (options = {}) => request(`/api/projects${query({ archived: options.archived ? 1 : undefined })}`),
 
   project: (reference) => request(`/api/projects/${enc(reference)}`),

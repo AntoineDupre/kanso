@@ -158,7 +158,7 @@ pub fn validate_title(raw: &str) -> Result<String, ApiError> {
     Ok(title.to_owned())
 }
 
-fn validate_description(raw: &str) -> Result<String, ApiError> {
+pub(crate) fn validate_description(raw: &str) -> Result<String, ApiError> {
     if raw.len() > MAX_DESCRIPTION_BYTES {
         return Err(ApiError::validation("description must be at most 64 KiB"));
     }
@@ -373,8 +373,29 @@ pub fn task_detail(
         comments: load_comments(connection, &task.id)?,
         activity: load_activity(connection, &task.id)?,
         dependencies: load_dependencies(connection, &task.id)?,
+        provenance: load_provenance(connection, &task.id)?,
         task,
     })
+}
+
+pub(crate) fn load_provenance(
+    connection: &rusqlite::Connection,
+    id: &str,
+) -> crate::error::Result<Option<super::model::Provenance>> {
+    Ok(connection
+        .query_row(
+            "SELECT provider, identity, kind, source_url FROM task_provenance WHERE task_id = ?1",
+            [id],
+            |row| {
+                Ok(super::model::Provenance {
+                    provider: row.get(0)?,
+                    identity: row.get(1)?,
+                    kind: row.get(2)?,
+                    source_url: row.get(3)?,
+                })
+            },
+        )
+        .optional()?)
 }
 
 const AGENT_MOVE_STATUSES: [&str; 4] = ["todo", "in_progress", "in_review", "blocker"];

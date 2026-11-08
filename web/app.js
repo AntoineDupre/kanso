@@ -14,6 +14,7 @@ import {
 } from "./dom.js";
 import { createBoardView } from "./board.js";
 import { Panel } from "./panel.js";
+import { renderImports } from "./imports.js";
 import {
   openCardForm,
   openProjectForm,
@@ -357,6 +358,9 @@ function buildShell() {
       el("div", { class: "search-box" }, [icon("search", { size: 15 }), search]),
       globalToggle,
       newCard,
+      state.me?.scope === "human"
+        ? iconButton(t("imports.title"), "download", { onClick: () => navigate("/imports") })
+        : null,
       notifications,
       help,
       settings,
@@ -580,6 +584,7 @@ function parseRoute(pathname) {
   if (path === "/" || path === "/index.html") return { name: "home" };
   if (path === "/global") return { name: "global" };
   if (path === "/inbox") return { name: "inbox" };
+  if (path === "/imports") return { name: "imports" };
   if (path === "/settings/projects") return { name: "settings-projects" };
   if (path === "/settings/tokens") return { name: "settings-tokens" };
   if (path === "/settings/integration") return { name: "settings-integration" };
@@ -647,6 +652,10 @@ async function renderRoute() {
       showPageRegion();
       renderInboxPage();
       renderChrome();
+      break;
+    case "imports":
+      showPageRegion();
+      await renderImports(state.dom.pageRegion, state.projects, () => state.routeToken === token, navigate);
       break;
     case "settings-projects":
       showPageRegion();

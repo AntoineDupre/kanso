@@ -189,6 +189,15 @@ pub struct TaskDetail {
     pub comments: Vec<Comment>,
     pub activity: Vec<Activity>,
     pub dependencies: Dependencies,
+    pub provenance: Option<Provenance>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Provenance {
+    pub provider: String,
+    pub identity: String,
+    pub kind: String,
+    pub source_url: String,
 }
 
 /// The small card shape sent by the board endpoints (not the full detail).

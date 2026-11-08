@@ -31,6 +31,8 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
+      - name: Import UI workflow
+        run: node tests/imports_ui.mjs
 
   sbom:
     name: SBOM

@@ -1,5 +1,7 @@
 # Kanso
 
+External task imports: see [Imports](docs/IMPORTS.md). Provider support is not yet enabled.
+
 A single-user kanban board for your projects, with **optional** OpenCode /
 OpenChamber agent sessions.
 

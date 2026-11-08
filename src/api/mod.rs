@@ -30,6 +30,7 @@ mod dispatch;
 mod error;
 mod events;
 mod export;
+mod imports;
 mod inbox;
 mod integration;
 mod labels;
@@ -376,6 +377,9 @@ pub fn response_with_cookie(status: axum::http::StatusCode, cookie: &str) -> Res
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/api/imports/providers", get(imports::providers))
+        .route("/api/imports/preview", post(imports::preview))
+        .route("/api/imports/confirm", post(imports::confirm))
         .route("/api/auth/login", post(session::login))
         .route("/api/auth/logout", post(session::logout))
         .route("/api/me", get(session::me))

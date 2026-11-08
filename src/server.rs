@@ -32,6 +32,7 @@ pub struct AppState {
     pub auth: Arc<AuthConfig>,
     pub login_limiter: Arc<crate::auth::LoginLimiter>,
     pub events: Arc<EventBus>,
+    pub imports: Arc<crate::importer::Registry>,
     /// Present only when both OpenChamber environment variables are set.
     pub openchamber: Option<Arc<crate::adapter::openchamber::OpenChamber>>,
     /// Task ids with an upstream dispatch in flight, so two clicks cannot
@@ -70,11 +71,21 @@ impl AppState {
             auth: Arc::new(auth),
             login_limiter: Arc::new(crate::auth::LoginLimiter::default()),
             events: Arc::new(EventBus::new(heartbeat)),
+            imports: Arc::new(crate::importer::Registry::default()),
             openchamber: None,
             dispatch_in_flight: Arc::new(Mutex::new(HashSet::new())),
             health: Arc::new(Mutex::new(None)),
             health_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Supply provider adapters. Production leaves the registry empty.
+    pub fn with_import_providers(
+        mut self,
+        providers: Vec<Arc<dyn crate::importer::Provider>>,
+    ) -> Self {
+        self.imports = Arc::new(crate::importer::Registry::new(providers));
+        self
     }
 
     /// Attach a configured OpenChamber adapter. `kanso serve` starts the

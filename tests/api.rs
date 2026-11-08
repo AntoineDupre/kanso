@@ -335,6 +335,649 @@ fn activity_kinds(task: &Value) -> Vec<String> {
         .collect()
 }
 
+struct TestImportProvider;
+
+impl kanso::importer::Provider for TestImportProvider {
+    fn info(&self) -> kanso::importer::ProviderInfo {
+        use kanso::importer::{Filter, ProviderInfo, Source};
+        ProviderInfo {
+            id: "fixture".into(),
+            name: "Fixture".into(),
+            sources: vec![
+                Source {
+                    id: "one".into(),
+                    name: "One".into(),
+                },
+                Source {
+                    id: "two".into(),
+                    name: "Two".into(),
+                },
+            ],
+            filters: vec![Filter {
+                id: "query".into(),
+                label: "Query".into(),
+            }],
+        }
+    }
+
+    fn preview(
+        &self,
+        _: &str,
+        filters: &std::collections::HashMap<String, String>,
+    ) -> Result<Vec<kanso::importer::Candidate>, kanso::importer::ProviderError> {
+        let query = filters.get("query").map(String::as_str).unwrap_or("");
+        if query == "fail" {
+            return Err(kanso::importer::ProviderError);
+        }
+        let candidate = |identity: &str, title: &str, url: &str| kanso::importer::Candidate {
+            identity: identity.into(),
+            kind: "issue".into(),
+            title: title.into(),
+            description: "<script>alert(1)</script> **hello**".into(),
+            source_url: url.into(),
+        };
+        let candidates = vec![
+            candidate("stable", "Original", "https://example.com/item"),
+            candidate("bad", "Unsafe", "javascript:alert(1)"),
+            candidate("long", &"x".repeat(201), "https://example.com/item2"),
+            candidate("other", "Other", "https://example.com/other"),
+        ];
+        match query {
+            "count-limit" => Ok(vec![candidates[0].clone(); 200]),
+            "too-many" => Ok(vec![candidates[0].clone(); 201]),
+            "too-large" => {
+                let mut item = candidates[0].clone();
+                item.description = "x".repeat(2 * 1024 * 1024);
+                Ok(vec![item])
+            }
+            "size-limit" => {
+                let mut item = candidates[0].clone();
+                let other_bytes = item.identity.len()
+                    + item.kind.len()
+                    + item.title.len()
+                    + item.source_url.len();
+                item.description = "x".repeat(2 * 1024 * 1024 - other_bytes);
+                Ok(vec![item])
+            }
+            "field-limits" => {
+                let mut items = Vec::new();
+                let mut item = candidates[0].clone();
+                item.description = "x".repeat(64 * 1024);
+                items.push(item.clone());
+                item.description.push('x');
+                items.push(item.clone());
+                item.description.clear();
+                item.identity = "x".repeat(513);
+                items.push(item.clone());
+                item.identity = "ok".into();
+                item.kind = "x".repeat(129);
+                items.push(item);
+                Ok(items)
+            }
+            _ => Ok(candidates),
+        }
+    }
+}
+
+fn import_app(provider: std::sync::Arc<dyn kanso::importer::Provider>) -> TestApp {
+    let mut app = TestApp::new();
+    app.state = app.state.clone().with_import_providers(vec![provider]);
+    app.app = router(app.state.clone())
+        .layer(MockConnectInfo(SocketAddr::from(([203, 0, 113, 7], 4444))));
+    app
+}
+
+fn import_preview_request(project: &str, query: &str) -> Value {
+    json!({
+        "project_id": project,
+        "provider": "fixture",
+        "source": "one",
+        "filters": { "query": query }
+    })
+}
+
+fn import_confirm_request(project: &str, preview_id: &Value) -> Value {
+    json!({
+        "preview_id": preview_id,
+        "project_id": project,
+        "provider": "fixture",
+        "source": "one",
+        "selected": [0]
+    })
+}
+
+#[tokio::test]
+async fn import_mutations_enforce_auth_csrf_and_snapshot_ownership() {
+    let app = import_app(std::sync::Arc::new(TestImportProvider));
+    let cookie = app.login().await;
+    let other_cookie = app.login().await;
+    let project = app.create_project(&cookie, "OWN").await;
+    let id = project["id"].as_str().unwrap();
+    let agent = app.create_token(&cookie, "import-agent", "agent").await;
+    let agent = agent["token"].as_str().unwrap();
+    let preview_request = import_preview_request(id, "");
+
+    let preview = app
+        .cookie_post(
+            "/api/imports/preview",
+            Some(preview_request.clone()),
+            &cookie,
+        )
+        .await;
+    assert_eq!(preview.status, StatusCode::OK);
+    let confirm_request = import_confirm_request(id, &preview.body["preview_id"]);
+
+    for (path, body) in [
+        ("/api/imports/preview", preview_request),
+        ("/api/imports/confirm", confirm_request.clone()),
+    ] {
+        let anonymous = app
+            .request(Method::POST, path, Some(body.clone()), None, None, None)
+            .await;
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED, "{path}");
+        let agent_response = app
+            .request(
+                Method::POST,
+                path,
+                Some(body.clone()),
+                None,
+                Some(agent),
+                None,
+            )
+            .await;
+        assert_eq!(agent_response.status, StatusCode::FORBIDDEN, "{path}");
+        let csrf = app
+            .request(
+                Method::POST,
+                path,
+                Some(body),
+                Some(&cookie),
+                None,
+                Some("https://evil.example"),
+            )
+            .await;
+        assert_eq!(csrf.code(), "csrf", "{path}");
+        assert_eq!(csrf.status, StatusCode::FORBIDDEN, "{path}");
+    }
+
+    let cross_owner = app
+        .cookie_post(
+            "/api/imports/confirm",
+            Some(confirm_request.clone()),
+            &other_cookie,
+        )
+        .await;
+    assert_eq!(cross_owner.status, StatusCode::CONFLICT);
+    for field in ["project_id", "provider", "source"] {
+        let mut mismatch = confirm_request.clone();
+        mismatch[field] = json!("different");
+        let response = app
+            .cookie_post("/api/imports/confirm", Some(mismatch), &cookie)
+            .await;
+        assert_eq!(response.status, StatusCode::CONFLICT, "{field}");
+    }
+    for field in [
+        "candidate",
+        "candidates",
+        "title",
+        "identity",
+        "description",
+        "source_url",
+    ] {
+        let mut forged = confirm_request.clone();
+        forged[field] = json!("attacker-controlled");
+        let response = app
+            .cookie_post("/api/imports/confirm", Some(forged), &cookie)
+            .await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{field}");
+    }
+    assert_eq!(app.db_i64("SELECT count(*) FROM tasks", vec![]).await, 0);
+    let accepted = app
+        .cookie_post("/api/imports/confirm", Some(confirm_request), &cookie)
+        .await;
+    assert_eq!(accepted.body[0]["status"], "created");
+}
+
+#[tokio::test]
+async fn import_preview_rejects_invalid_controls_and_invalidates_old_snapshots() {
+    let app = import_app(std::sync::Arc::new(TestImportProvider));
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "CTL").await;
+    let id = project["id"].as_str().unwrap();
+
+    let invalid = [
+        ("provider", json!("unknown")),
+        ("source", json!("unknown")),
+        ("project_id", json!("unknown")),
+        ("filters", json!({"unknown": "value"})),
+        ("filters", json!({"query": "x".repeat(1025)})),
+        ("filters", json!({"query": "bad\nvalue"})),
+    ];
+    for (field, value) in invalid {
+        let preview = app
+            .cookie_post(
+                "/api/imports/preview",
+                Some(import_preview_request(id, "")),
+                &cookie,
+            )
+            .await;
+        assert_eq!(preview.status, StatusCode::OK);
+        let confirm = import_confirm_request(id, &preview.body["preview_id"]);
+        let mut bad = import_preview_request(id, "");
+        bad[field] = value;
+        assert_eq!(
+            app.cookie_post("/api/imports/preview", Some(bad), &cookie)
+                .await
+                .status,
+            StatusCode::BAD_REQUEST,
+            "{field}"
+        );
+        assert_eq!(
+            app.cookie_post("/api/imports/confirm", Some(confirm), &cookie)
+                .await
+                .status,
+            StatusCode::CONFLICT,
+            "old preview after invalid {field}"
+        );
+    }
+    let old = app
+        .cookie_post(
+            "/api/imports/preview",
+            Some(import_preview_request(id, "")),
+            &cookie,
+        )
+        .await;
+    let old_confirm = import_confirm_request(id, &old.body["preview_id"]);
+    let failed = app
+        .cookie_post(
+            "/api/imports/preview",
+            Some(import_preview_request(id, "fail")),
+            &cookie,
+        )
+        .await;
+    assert_eq!(failed.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        app.cookie_post("/api/imports/confirm", Some(old_confirm), &cookie)
+            .await
+            .status,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(app.db_i64("SELECT count(*) FROM tasks", vec![]).await, 0);
+}
+
+#[tokio::test]
+async fn import_preview_and_selection_limits_are_enforced() {
+    let app = import_app(std::sync::Arc::new(TestImportProvider));
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "LIM").await;
+    let id = project["id"].as_str().unwrap();
+
+    let limit = app
+        .cookie_post(
+            "/api/imports/preview",
+            Some(import_preview_request(id, "count-limit")),
+            &cookie,
+        )
+        .await;
+    assert_eq!(limit.status, StatusCode::OK);
+    assert_eq!(limit.body["candidates"].as_array().unwrap().len(), 200);
+    let mut too_many_selected = import_confirm_request(id, &limit.body["preview_id"]);
+    too_many_selected["selected"] = json!((0..201).collect::<Vec<_>>());
+    assert_eq!(
+        app.cookie_post("/api/imports/confirm", Some(too_many_selected), &cookie)
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+
+    for query in ["too-many", "too-large"] {
+        let response = app
+            .cookie_post(
+                "/api/imports/preview",
+                Some(import_preview_request(id, query)),
+                &cookie,
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE, "{query}");
+        assert_eq!(response.code(), "provider_error");
+    }
+    let size_limit = app
+        .cookie_post(
+            "/api/imports/preview",
+            Some(import_preview_request(id, "size-limit")),
+            &cookie,
+        )
+        .await;
+    assert_eq!(size_limit.status, StatusCode::OK);
+    // The aggregate preview fits, but the individual description is invalid.
+    assert_eq!(size_limit.body["candidates"][0]["valid"], false);
+    let fields = app
+        .cookie_post(
+            "/api/imports/preview",
+            Some(import_preview_request(id, "field-limits")),
+            &cookie,
+        )
+        .await;
+    assert_eq!(fields.status, StatusCode::OK);
+    let candidates = fields.body["candidates"].as_array().unwrap();
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|c| c["valid"].as_bool().unwrap())
+            .collect::<Vec<_>>(),
+        [true, false, false, false]
+    );
+    assert_eq!(app.db_i64("SELECT count(*) FROM tasks", vec![]).await, 0);
+}
+
+struct SlowImportProvider {
+    started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl kanso::importer::Provider for SlowImportProvider {
+    fn info(&self) -> kanso::importer::ProviderInfo {
+        kanso::importer::Provider::info(&TestImportProvider)
+    }
+
+    fn preview(
+        &self,
+        source: &str,
+        filters: &std::collections::HashMap<String, String>,
+    ) -> Result<Vec<kanso::importer::Candidate>, kanso::importer::ProviderError> {
+        if filters.get("query").is_some_and(|value| value == "slow") {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|_| kanso::importer::ProviderError)?;
+        }
+        kanso::importer::Provider::preview(&TestImportProvider, source, filters)
+    }
+}
+
+#[tokio::test]
+async fn import_older_preview_cannot_replace_newer_out_of_order_result() {
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let provider = SlowImportProvider {
+        started: std::sync::Mutex::new(Some(started_tx)),
+        release: std::sync::Mutex::new(release_rx),
+    };
+    let app = import_app(std::sync::Arc::new(provider));
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "RAC").await;
+    let id = project["id"].as_str().unwrap();
+
+    let slow = app.cookie_post(
+        "/api/imports/preview",
+        Some(import_preview_request(id, "slow")),
+        &cookie,
+    );
+    let newer = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+            .await
+            .expect("slow provider did not start")
+            .expect("slow provider dropped signal");
+        let response = app
+            .cookie_post(
+                "/api/imports/preview",
+                Some(import_preview_request(id, "")),
+                &cookie,
+            )
+            .await;
+        release_tx.send(()).unwrap();
+        response
+    };
+    let (slow, newer) = tokio::join!(slow, newer);
+    assert_eq!(slow.status, StatusCode::CONFLICT);
+    assert_eq!(newer.status, StatusCode::OK);
+    let confirm = import_confirm_request(id, &newer.body["preview_id"]);
+    let result = app
+        .cookie_post("/api/imports/confirm", Some(confirm), &cookie)
+        .await;
+    assert_eq!(result.body[0]["status"], "created");
+}
+
+#[tokio::test]
+async fn imports_auth_preview_confirm_and_provenance() {
+    let mut app = TestApp::new();
+    app.state = app
+        .state
+        .clone()
+        .with_import_providers(vec![std::sync::Arc::new(TestImportProvider)]);
+    app.app = router(app.state.clone())
+        .layer(MockConnectInfo(SocketAddr::from(([203, 0, 113, 7], 4444))));
+    let cookie = app.login().await;
+    let project = app.create_project(&cookie, "IMP").await;
+    let id = project["id"].as_str().unwrap();
+    let agent = app.create_token(&cookie, "import-agent", "agent").await;
+    let agent = agent["token"].as_str().unwrap();
+    let human = app.create_token(&cookie, "import-human", "human").await;
+    assert_eq!(
+        app.get("/api/imports/providers", None, human["token"].as_str())
+            .await
+            .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.get("/api/imports/providers", None, None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.get("/api/imports/providers", None, Some(agent))
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.get("/api/imports/providers", Some(&cookie), None)
+            .await
+            .body[0]["id"],
+        "fixture"
+    );
+    let input = import_preview_request(id, "");
+    assert_eq!(
+        app.request(
+            Method::POST,
+            "/api/imports/preview",
+            Some(input.clone()),
+            Some(&cookie),
+            None,
+            Some("https://evil.example")
+        )
+        .await
+        .status,
+        StatusCode::FORBIDDEN
+    );
+    let failed = app
+        .cookie_post(
+            "/api/imports/preview",
+            Some(import_preview_request(id, "fail")),
+            &cookie,
+        )
+        .await;
+    assert_eq!(failed.status, StatusCode::SERVICE_UNAVAILABLE);
+    let preview = app
+        .cookie_post("/api/imports/preview", Some(input.clone()), &cookie)
+        .await;
+    assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
+    assert_eq!(preview.body["candidates"][1]["valid"], false);
+    assert_eq!(preview.body["candidates"][2]["valid"], false);
+    assert_eq!(app.db_i64("SELECT count(*) FROM tasks", vec![]).await, 0);
+    let preview_id = preview.body["preview_id"].as_str().unwrap();
+    let mut confirm = import_confirm_request(id, &json!(preview_id));
+    confirm["selected"] = json!([0, 1, 2]);
+    let mut forged = import_confirm_request(id, &json!(preview_id));
+    forged["source"] = json!("two");
+    assert_eq!(
+        app.cookie_post("/api/imports/confirm", Some(forged), &cookie)
+            .await
+            .status,
+        StatusCode::CONFLICT
+    );
+    let mut duplicate = import_confirm_request(id, &json!(preview_id));
+    duplicate["selected"] = json!([0, 0]);
+    assert_eq!(
+        app.cookie_post("/api/imports/confirm", Some(duplicate), &cookie)
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    let mut empty = import_confirm_request(id, &json!(preview_id));
+    empty["selected"] = json!([]);
+    assert_eq!(
+        app.cookie_post("/api/imports/confirm", Some(empty), &cookie)
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    let mut invented = import_confirm_request(id, &json!(preview_id));
+    invented["selected"] = json!([99]);
+    assert_eq!(
+        app.cookie_post("/api/imports/confirm", Some(invented), &cookie)
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    let mut events = app.state.events.subscribe();
+    let (first, second) = tokio::join!(
+        app.cookie_post("/api/imports/confirm", Some(confirm.clone()), &cookie),
+        app.cookie_post("/api/imports/confirm", Some(confirm.clone()), &cookie)
+    );
+    let statuses = [
+        first.body[0]["status"].as_str().unwrap(),
+        second.body[0]["status"].as_str().unwrap(),
+    ];
+    assert!(statuses.contains(&"created") && statuses.contains(&"skipped"));
+    assert_eq!(first.body[1]["status"], "failed");
+    assert_eq!(first.body[2]["status"], "failed");
+    let event = events.try_recv().expect("created event");
+    assert_eq!(event.kind, "task.created");
+    assert!(events.try_recv().is_err());
+    assert_eq!(app.db_i64("SELECT count(*) FROM tasks", vec![]).await, 1);
+    let reference = first.body[0]["reference"].as_str().unwrap();
+    let detail = app
+        .get(&format!("/api/tasks/{reference}"), Some(&cookie), None)
+        .await
+        .body;
+    assert_eq!(detail["provenance"]["identity"], "stable");
+    assert_eq!(detail["source"], "human");
+    assert_eq!(detail["status"], "backlog");
+    assert_eq!(detail["description"], "<script>alert(1)</script> **hello**");
+    assert!(activity_kinds(&detail).contains(&"created".to_string()));
+    assert_eq!(
+        app.get("/api/export.json", Some(&cookie), None).await.body["tasks"][0]["provenance"]
+            ["source_url"],
+        "https://example.com/item"
+    );
+    app.state
+        .db
+        .call(|db| {
+            db.execute_batch(
+                "CREATE TRIGGER import_test_failure BEFORE INSERT ON task_provenance
+                 WHEN NEW.identity = 'other'
+                 BEGIN SELECT RAISE(ABORT, 'fixture'); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut other_item = import_confirm_request(id, &json!(preview_id));
+    other_item["selected"] = json!([3]);
+    assert_eq!(
+        app.cookie_post("/api/imports/confirm", Some(other_item.clone()), &cookie)
+            .await
+            .body[0]["status"],
+        "failed"
+    );
+    assert_eq!(app.db_i64("SELECT count(*) FROM tasks", vec![]).await, 1);
+    app.state
+        .db
+        .call(|db| {
+            db.execute_batch("DROP TRIGGER import_test_failure")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        app.cookie_post("/api/imports/confirm", Some(other_item), &cookie)
+            .await
+            .body[0]["status"],
+        "created"
+    );
+    app.cookie_patch(
+        &format!("/api/tasks/{reference}"),
+        json!({"title":"Local edit"}),
+        &cookie,
+    )
+    .await;
+    app.cookie_post(&format!("/api/tasks/{reference}/archive"), None, &cookie)
+        .await;
+    let again = app
+        .cookie_post("/api/imports/confirm", Some(confirm), &cookie)
+        .await;
+    assert_eq!(again.body[0]["status"], "skipped");
+    assert_eq!(
+        app.get(&format!("/api/tasks/{reference}"), Some(&cookie), None)
+            .await
+            .body["title"],
+        "Local edit"
+    );
+    let newer = app
+        .cookie_post("/api/imports/preview", Some(input), &cookie)
+        .await;
+    assert_eq!(newer.body["candidates"][0]["existing"], reference);
+    let mut stale = import_confirm_request(id, &json!(preview_id));
+    stale["selected"] = json!([3]);
+    assert_eq!(
+        app.cookie_post("/api/imports/confirm", Some(stale), &cookie)
+            .await
+            .status,
+        StatusCode::CONFLICT
+    );
+    let project2 = app.create_project(&cookie, "TWO").await;
+    let id2 = project2["id"].as_str().unwrap();
+    let mut other_request = import_preview_request(id2, "");
+    other_request["source"] = json!("two");
+    let other = app
+        .cookie_post("/api/imports/preview", Some(other_request), &cookie)
+        .await;
+    let mut different = import_confirm_request(id2, &other.body["preview_id"]);
+    different["source"] = json!("two");
+    assert_eq!(
+        app.cookie_post("/api/imports/confirm", Some(different), &cookie)
+            .await
+            .body[0]["status"],
+        "created"
+    );
+    app.cookie_post(&format!("/api/projects/{id2}/archive"), None, &cookie)
+        .await;
+    assert_eq!(
+        app.cookie_post(
+            "/api/imports/preview",
+            Some(import_preview_request(id2, "")),
+            &cookie
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        app.cookie_post(
+            "/api/imports/preview",
+            Some(import_preview_request("missing", "")),
+            &cookie
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+}
+
 #[tokio::test]
 async fn login_success_failure_and_rate_limit() {
     let app = TestApp::new();
