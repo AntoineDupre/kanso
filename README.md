@@ -313,6 +313,11 @@ origin check; read-only GETs such as `/api/export.json` do not.
 Project keys are 2–6 characters of `A-Z`/`0-9`, stored uppercase and unique
 case-insensitively.
 
+For a Kanso-dispatched session, add the `need_spec` label to a card when the
+agent should ask specification questions. Without that label, the built-in
+dispatch instructions tell the agent not to ask questions in chat or comments;
+it can report missing information through the blocker flow instead.
+
 A project `model`, and a dispatch model override, use the
 `provider/model[#variant]` syntax (for example
 `opencode-go/deepseek-v4.1-flash#max`). The optional `#variant` is the

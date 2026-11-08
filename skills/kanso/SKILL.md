@@ -33,6 +33,10 @@ given: never create another worktree, change directory, or touch another card.
 
 ## Rules
 
+- In a session dispatched from Kanso, check the card's `labels:` line. If it
+  has no label named `need_spec`, do not ask questions in chat or card comments;
+  work from the existing specification. If unable to proceed safely, use the
+  blocker flow to report what is missing without asking a question.
 - IN REVIEW is reserved for human review, not review between AI agents.
 - Never move a card to `done`. Review and completion are the human's decision.
 - Never delete or archive a card, and never change another card's priority.

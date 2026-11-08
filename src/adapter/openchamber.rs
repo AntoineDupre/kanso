@@ -40,6 +40,7 @@ Project: {{project}}
 
 Rules:
 - Work only inside the current worktree.
+- Check the card's labels with `kanso task show {{ref}}`. If it does not have the `need_spec` label, do not ask questions in chat or card comments; work from the existing specification. If unable to proceed safely, use the blocker flow to report what is missing without asking a question.
 - Report progress with the CLI: `kanso comment {{ref}} \"…\"`.
 - When finished, run `kanso move {{ref}} in_review` and comment a summary.
 - If blocked, run `kanso move {{ref}} blocker --reason \"…\"`.
@@ -1056,6 +1057,10 @@ mod tests {
             .as_str()
             .expect("prompt")
             .contains("Some details."));
+        let prompt = input["prompt"].as_str().expect("prompt");
+        assert!(prompt.contains("kanso task show ALP-42"));
+        assert!(prompt.contains("If it does not have the `need_spec` label"));
+        assert!(prompt.contains("do not ask questions in chat or card comments"));
     }
 
     #[test]
