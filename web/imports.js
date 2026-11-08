@@ -72,6 +72,9 @@ export async function renderImports(region, projects, current, navigate) {
     el("option", { value: provider.id, text: provider.name })
   ));
   const source = select(t("imports.source"), t("imports.selectSource"), []);
+  const category = el("select", { class: "input", "aria-label": t("github.categoryLabel") });
+  const categoryField = el("label", { class: "field", hidden: true }, [el("span", { class: "field-label", text: t("github.category") }), category]);
+  page.append(categoryField);
   const filtersBox = el("div");
   const results = el("div");
   const error = el("p", { class: "form-error", role: "alert" });
@@ -81,40 +84,83 @@ export async function renderImports(region, projects, current, navigate) {
   page.append(filtersBox, previewButton, error, results);
   let generation = 0;
   let filters = [];
+  let allAssignees = null;
+  let allLabel = null;
+  let discovering = false;
+  let discoveryVersion = 0;
+  function selectedSource() {
+    return provider.value === "github" ? (source.value && category.value ? `${source.value}|${category.value}` : "") : source.value;
+  }
   function invalidate() {
     generation += 1;
     results.replaceChildren();
     error.textContent = "";
     previewButton.textContent = t("imports.preview");
-    previewButton.disabled = !(project.value && provider.value && source.value);
+    previewButton.disabled = discovering || !(project.value && provider.value && selectedSource());
   }
   function controls() {
     const selected = providers.find((providerInfo) => providerInfo.id === provider.value);
+    const github = provider.value === "github";
+    categoryField.hidden = !github;
+    const sources = selected?.sources || [];
+    const repositories = [...new Set(sources.map((item) => item.id.split("|")[0]))];
     source.replaceChildren(
       el("option", { value: "", text: t("imports.selectSource") }),
-      ...(selected?.sources || []).map((sourceInfo) => el("option", { value: sourceInfo.id, text: sourceInfo.name }))
+      ...(github ? repositories.map((name) => el("option", { value: name, text: name })) : sources.map((sourceInfo) => el("option", { value: sourceInfo.id, text: sourceInfo.name })))
     );
     filters = (selected?.filters || []).map((filter) => ({
       id: filter.id,
-      label: filter.label,
-      input: el("input", { class: "input", type: "text", "aria-label": filter.label, onInput: invalidate })
+      label: github ? t("github.username") : filter.label,
+      input: el("input", { class: "input", type: "text", "aria-label": github ? t("github.username") : filter.label, placeholder: github ? t("github.usernameHint") : "", onInput: invalidate })
     }));
+    allAssignees = github ? el("input", { type: "checkbox", "aria-label": t("github.allAssignees"), onChange: () => { if (filters[0]) filters[0].input.disabled = allAssignees.checked; invalidate(); } }) : null;
+    allLabel = github ? el("label", { class: "field-hint", hidden: true }, [allAssignees, ` ${t("github.allAssigneesHint")}`]) : null;
     filtersBox.replaceChildren(...filters.map((filter) => el("label", { class: "field" }, [
       el("span", { class: "field-label", text: filter.label }), filter.input
-    ])));
+    ])), ...(allLabel ? [allLabel] : []));
+    categories();
     invalidate();
   }
-  project.addEventListener("change", invalidate);
+  function categories() {
+    if (provider.value !== "github") return;
+    const selected = providers.find((item) => item.id === "github");
+    category.replaceChildren(el("option", { value: "", text: t("github.selectCategory") }), ...(selected?.sources || [])
+      .filter((item) => item.id.startsWith(`${source.value}|`))
+      .map((item) => el("option", { value: item.id.split("|")[1], text: t(`github.${item.id.split("|")[1]}`) })));
+    categoryChanged();
+  }
+  function categoryChanged() {
+    if (allLabel) allLabel.hidden = category.value !== "issues";
+    if (allAssignees) allAssignees.checked = false;
+    if (filters[0]) filters[0].input.disabled = false;
+    invalidate();
+  }
+  project.addEventListener("change", async () => {
+    discovering = Boolean(project.value);
+    invalidate();
+    const version = ++discoveryVersion;
+    if (!project.value) { controls(); return; }
+    try {
+      const scoped = await api.importProviders(project.value);
+      if (!current() || version !== discoveryVersion) return;
+      providers = scoped;
+      discovering = false;
+      controls();
+    } catch (failure) { if (current() && version === discoveryVersion) { providers = []; discovering = false; controls(); error.textContent = failure.message; } }
+  });
   provider.addEventListener("change", controls);
-  source.addEventListener("change", invalidate);
+  source.addEventListener("change", () => { categories(); invalidate(); });
+  category.addEventListener("change", categoryChanged);
   previewButton.addEventListener("click", async () => {
     invalidate();
     const version = generation;
     const payload = {
       project_id: project.value,
       provider: provider.value,
-      source: source.value,
-      filters: Object.fromEntries(filters.map((filter) => [filter.id, filter.input.value]))
+      source: selectedSource(),
+      filters: provider.value === "github"
+        ? (allAssignees?.checked && category.value === "issues" ? { user: "" } : filters[0]?.input.value ? { user: filters[0].input.value } : {})
+        : Object.fromEntries(filters.map((filter) => [filter.id, filter.input.value]))
     };
     previewButton.disabled = true;
     previewButton.textContent = t("imports.previewing");
@@ -148,7 +194,7 @@ export async function renderImports(region, projects, current, navigate) {
             item.existing ? el("p", {}, [
               document.createTextNode(t("imports.existing", { reference: "" })), taskLink(item.existing, navigate)
             ]) : null,
-            !item.valid ? el("p", { class: "form-error", text: t("imports.invalid") }) : null
+            !item.valid ? el("p", { class: "form-error", text: candidate.invalid_reason || t("imports.invalid") }) : null
           ])
         ]));
       }

@@ -8,15 +8,66 @@ the local card is archived. Local edits are never overwritten. Imports create
 ordinary active backlog cards with normal priority; the task detail links to
 the original. Provenance is included in JSON exports and database backups.
 
-No external provider is enabled yet. GitHub support and configuration are
-planned separately in KANSO-2. No credentials are needed for these tests.
+## GitHub
+
+In **Settings → Projects**, open **GitHub repositories** for the destination
+project. Add one or more `owner/repo` repositories and independently enable
+Issues, PRs to review, and PRs to follow; save the configuration. Only humans
+can configure or use imports. On **Imports**, select the destination project,
+GitHub, one linked repository and one enabled category. Blank username means
+the server's authenticated GitHub user. For issues, choose **All issue
+assignees** to explicitly include all assignees instead. An explicit username
+selects an assignee, requested reviewer, or author respectively.
+
+![Project settings with multiple GitHub repositories and enabled categories](screenshots/kanso-2/repository-settings.png)
+
+![GitHub issue preview with an already imported item](screenshots/kanso-2/import-preview.png)
+
+The screenshots use fictional repositories and fixture data.
+
+Issues are open issues, not PRs. Review candidates are open, non-draft PRs
+with an outstanding direct request for the selected user; the authenticated
+account's own PRs and team-only requests are excluded. Follow candidates are
+open PRs authored by the selected user, including drafts. The GitHub node ID
+deduplicates an item across repository renames and PR categories per Kanso
+project; the first category and local changes remain untouched. Import is
+manual and read-only: there is no sync, monitoring, notification, automatic
+transition, or GitHub write. Comments, reviews, attachments and Actions logs
+are not copied.
+
+Install `gh` and authenticate to github.com with its browser login as the same
+OS user and environment as the Kanso server. All humans share that identity;
+“me” is not the Kanso user. A login on a laptop is not a login for a remote
+server. On a non-container host, the operator can run
+`gh auth login --hostname github.com --web --git-protocol https --skip-ssh-key`
+as that server user and complete the device flow in a browser. The
+[container instructions](../README.md#container) and
+[deployment runbook](DEPLOY.md) cover persistence, rootless uid mapping and
+credential protection. Kanso never starts login from a request. If preview
+fails, check that `gh` is installed and authenticated and that the account can
+read the linked repository. No subprocess diagnostics or credentials are
+returned to the browser.
+
+The GitHub adapter bounds each preview to 30 seconds, three pages of 100
+remote records, 4 MiB per response, and 200 matching candidates. An incomplete
+or failed query returns an error rather than an empty or partial success.
+Oversized item content is explicitly marked invalid, not imported or silently
+truncated. Repository source configuration can be removed or disabled between
+preview and confirmation; confirmation checks it again transactionally.
+
+If GitHub returns more records than these bounds permit, choose a smaller
+repository or increase the adapter's bounds before retrying. Kanso will not
+silently claim that a partial result is complete. After changing repository permissions or the server's gh login,
+request a new preview. Never paste tokens into a repository name, username
+filter, task, comment, or diagnostic report.
 
 ## Provider extension contract
 
 Implement `importer::Provider` and register it in the server's `AppState` via
-`with_import_providers`. The production registry is currently empty. `info()`
+`with_import_providers`. Production registers the GitHub adapter. `info()`
 describes public, non-secret provider metadata, source choices and text filter
-controls; `preview()` validates filter semantics and performs remote I/O on a
+controls; `project_info()` may resolve sources from local configuration under
+the database lock and must not perform remote I/O. `preview()` validates filter semantics and performs remote I/O on a
 blocking worker, without a database lock. The adapter owns authentication,
 pagination, source configuration and any category-specific semantics. It must
 not put credentials in controls, results, URLs, task content, logs or errors.
@@ -50,11 +101,16 @@ exercises the end-to-end flow without cloud access.
 
 ## API workflow
 
-1. `GET /api/imports/providers` returns provider IDs/names, available source
+1. `GET /api/imports/providers?project_id=<id>` returns provider IDs/names, available source
    IDs/names, and filter IDs/labels. An empty array means no provider is
    registered. Filter controls are plain text; adapters validate their semantics.
+   Without `project_id`, only global metadata is returned. For GitHub, a source
+   ID is `owner/repo|issues`, `owner/repo|review`, or `owner/repo|follow`, and
+   only enabled sources for that project are returned. Omitting the `user`
+   filter means the gh account; `{"user":""}` means all assignees for issues
+   only. Other values are explicit usernames.
 2. `POST /api/imports/preview` accepts the following shape (IDs below are
-   illustrative, not a bundled provider):
+   illustrative):
 
    ```json
    {
@@ -68,7 +124,9 @@ exercises the end-to-end flow without cloud access.
    It returns `preview_id` and a `candidates` array. Each item has an `index`,
    normalized `candidate`, `valid` flag, and an `existing` local task reference
    or `null`. The normalized candidate contains `identity`, `kind`, `title`,
-   `description`, and `source_url`. Previewing never creates cards.
+   `description`, and `source_url`. When source content cannot be copied due to
+   its size, `invalid_reason` explains why the item is ineligible; the item is
+   not silently truncated or imported. Previewing never creates cards.
 3. `POST /api/imports/confirm` accepts only snapshot context and selected indexes:
 
    ```json
@@ -96,3 +154,9 @@ snapshots return `409`; invalid controls/selections return `400`; sanitized
 provider failures or oversized previews return `503`. Provider-wide failure
 must not be treated as a successful empty result. Invalid individual items
 remain visible in preview and fail individually if selected through the API.
+
+Humans can inspect or replace a project's complete repository configuration via
+`GET` or `PUT /api/projects/<id>/github-repositories`. PUT accepts an array of
+objects such as `{"repository":"owner/repo","issues":true,"review":false,"follow":true}`.
+The list is replaced atomically; repository names are unique case-insensitively.
+An empty list unlinks all repositories. Cookie requests require CSRF protection.

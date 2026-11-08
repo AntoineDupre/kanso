@@ -115,7 +115,7 @@ export const api = {
 
   integration: () => request("/api/integration").catch(() => null),
 
-  importProviders: () => request("/api/imports/providers"),
+  importProviders: (projectId) => request(`/api/imports/providers${query({ project_id: projectId })}`),
   importPreview: (payload) => request("/api/imports/preview", { method: "POST", body: payload }),
   importConfirm: (payload) => request("/api/imports/confirm", { method: "POST", body: payload }),
 
@@ -128,6 +128,9 @@ export const api = {
   updateProject: (id, payload) => request(`/api/projects/${enc(id)}`, { method: "PATCH", body: payload }),
 
   archiveProject: (id) => request(`/api/projects/${enc(id)}/archive`, { method: "POST" }),
+
+  githubRepositories: (id) => request(`/api/projects/${enc(id)}/github-repositories`),
+  saveGithubRepositories: (id, repositories) => request(`/api/projects/${enc(id)}/github-repositories`, { method: "PUT", body: repositories }),
 
   board: (projectReference) =>
     request(`/api/board${query({ project: projectReference || undefined })}`),

@@ -337,6 +337,256 @@ fn activity_kinds(task: &Value) -> Vec<String> {
 
 struct TestImportProvider;
 
+struct GithubFixture;
+impl kanso::importer::Provider for GithubFixture {
+    fn info(&self) -> kanso::importer::ProviderInfo {
+        kanso::importer::Provider::info(&kanso::importer::github::GitHub)
+    }
+    fn project_info(
+        &self,
+        db: &rusqlite::Connection,
+        project: &str,
+    ) -> kanso::error::Result<kanso::importer::ProviderInfo> {
+        kanso::importer::Provider::project_info(&kanso::importer::github::GitHub, db, project)
+    }
+    fn preview(
+        &self,
+        source: &str,
+        _: &std::collections::HashMap<String, String>,
+    ) -> Result<Vec<kanso::importer::Candidate>, kanso::importer::ProviderError> {
+        Ok(vec![kanso::importer::Candidate {
+            identity: "stable-node-id".into(),
+            kind: source.split('|').next_back().unwrap().into(),
+            title: "GitHub fixture".into(),
+            description: "Fixture body".into(),
+            source_url: "https://github.com/owner/repo/pull/1".into(),
+            invalid_reason: None,
+        }])
+    }
+}
+
+#[tokio::test]
+async fn github_configuration_discovery_and_identity_are_project_scoped() {
+    let production = TestApp::new();
+    let cookie = production.login().await;
+    let registered = production
+        .get("/api/imports/providers", Some(&cookie), None)
+        .await;
+    assert!(registered
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["id"] == "github"));
+
+    let app = import_app(std::sync::Arc::new(GithubFixture));
+    let cookie = app.login().await;
+    let first = app.create_project(&cookie, "GHA").await;
+    let second = app.create_project(&cookie, "GHB").await;
+    let p1 = first["id"].as_str().unwrap();
+    let p2 = second["id"].as_str().unwrap();
+    let path = format!("/api/projects/{p1}/github-repositories");
+    let repos = json!([{ "repository":"owner/repo", "issues":true, "review":true, "follow":false }, { "repository":"owner/other", "issues":false, "review":false, "follow":true }]);
+    let put = |body: Value| {
+        app.request(
+            Method::PUT,
+            &path,
+            Some(body),
+            Some(&cookie),
+            None,
+            Some(ORIGIN),
+        )
+    };
+    assert_eq!(put(repos.clone()).await.status, StatusCode::OK);
+    let listed = app.get(&path, Some(&cookie), None).await;
+    assert_eq!(listed.status, StatusCode::OK);
+    assert_eq!(listed.body.as_array().unwrap().len(), 2);
+    assert_eq!(
+        put(json!([{ "repository":"../bad", "issues":true, "review":false, "follow":false }]))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(put(json!((0..51).map(|n| json!({"repository":format!("owner/repo{n}"),"issues":true,"review":false,"follow":false})).collect::<Vec<_>>())).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(put(json!([{ "repository":"owner/repo", "issues":true, "review":true, "follow":true }, { "repository":"OWNER/REPO", "issues":true, "review":true, "follow":true }])).await.status, StatusCode::BAD_REQUEST);
+    let agent = app.create_token(&cookie, "github-agent", "agent").await;
+    assert_eq!(
+        app.get(&path, None, agent["token"].as_str()).await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.request(
+            Method::PUT,
+            &path,
+            Some(repos),
+            None,
+            agent["token"].as_str(),
+            None
+        )
+        .await
+        .status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.request(
+            Method::PUT,
+            &path,
+            Some(json!([])),
+            Some(&cookie),
+            None,
+            None
+        )
+        .await
+        .status,
+        StatusCode::FORBIDDEN
+    );
+    let discovery = app
+        .get(
+            &format!("/api/imports/providers?project_id={p1}"),
+            Some(&cookie),
+            None,
+        )
+        .await;
+    let sources = discovery.body[0]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 3);
+    assert!(!sources.iter().any(|s| s["id"] == "owner/repo|follow"));
+    let discovery = app
+        .get(
+            &format!("/api/imports/providers?project_id={p2}"),
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(discovery.body[0]["sources"].as_array().unwrap().len(), 0);
+    let preview = |project: &str, source: &str| json!({"project_id":project,"provider":"github","source":source,"filters":{}});
+    let forged = app
+        .cookie_post(
+            "/api/imports/preview",
+            Some(preview(p1, "owner/repo|follow")),
+            &cookie,
+        )
+        .await;
+    assert_eq!(forged.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        app.cookie_post(
+            "/api/imports/preview",
+            Some(preview(p2, "owner/repo|review")),
+            &cookie
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+    let first_preview = app
+        .cookie_post(
+            "/api/imports/preview",
+            Some(preview(p1, "owner/repo|review")),
+            &cookie,
+        )
+        .await;
+    assert_eq!(first_preview.status, StatusCode::OK);
+    let confirm = |project: &str, source: &str, id: &Value| json!({"project_id":project,"provider":"github","source":source,"preview_id":id,"selected":[0]});
+    let outcome = app
+        .cookie_post(
+            "/api/imports/confirm",
+            Some(confirm(
+                p1,
+                "owner/repo|review",
+                &first_preview.body["preview_id"],
+            )),
+            &cookie,
+        )
+        .await;
+    assert_eq!(outcome.body[0]["status"], "created");
+    let reference = outcome.body[0]["reference"].as_str().unwrap();
+    app.cookie_patch(
+        &format!("/api/tasks/{reference}"),
+        json!({"title":"Local edit"}),
+        &cookie,
+    )
+    .await;
+    app.cookie_post(&format!("/api/tasks/{reference}/archive"), None, &cookie)
+        .await;
+    let renamed =
+        json!([{ "repository":"new/name", "issues":false, "review":false, "follow":true }]);
+    assert_eq!(put(renamed).await.status, StatusCode::OK);
+    let p = app
+        .cookie_post(
+            "/api/imports/preview",
+            Some(preview(p1, "new/name|follow")),
+            &cookie,
+        )
+        .await;
+    assert_eq!(p.body["candidates"][0]["existing"], reference);
+    let skipped = app
+        .cookie_post(
+            "/api/imports/confirm",
+            Some(confirm(p1, "new/name|follow", &p.body["preview_id"])),
+            &cookie,
+        )
+        .await;
+    assert_eq!(skipped.body[0]["status"], "skipped");
+    assert_eq!(
+        app.get(&format!("/api/tasks/{reference}"), Some(&cookie), None)
+            .await
+            .body["title"],
+        "Local edit"
+    );
+    let p = app
+        .cookie_post(
+            "/api/imports/preview",
+            Some(preview(p1, "new/name|follow")),
+            &cookie,
+        )
+        .await;
+    assert_eq!(put(json!([])).await.status, StatusCode::OK);
+    let disabled = app
+        .cookie_post(
+            "/api/imports/confirm",
+            Some(confirm(p1, "new/name|follow", &p.body["preview_id"])),
+            &cookie,
+        )
+        .await;
+    assert_eq!(disabled.body[0]["status"], "failed");
+    assert_eq!(
+        disabled.body[0]["message"],
+        "Repository or category is no longer enabled"
+    );
+    let second_path = format!("/api/projects/{p2}/github-repositories");
+    assert_eq!(
+        app.request(
+            Method::PUT,
+            &second_path,
+            Some(
+                json!([{ "repository":"new/name", "issues":false, "review":false, "follow":true }])
+            ),
+            Some(&cookie),
+            None,
+            Some(ORIGIN)
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let p = app
+        .cookie_post(
+            "/api/imports/preview",
+            Some(preview(p2, "new/name|follow")),
+            &cookie,
+        )
+        .await;
+    assert!(p.body["candidates"][0]["existing"].is_null());
+    let second_import = app
+        .cookie_post(
+            "/api/imports/confirm",
+            Some(confirm(p2, "new/name|follow", &p.body["preview_id"])),
+            &cookie,
+        )
+        .await;
+    assert_eq!(second_import.body[0]["status"], "created");
+    assert_ne!(second_import.body[0]["reference"], reference);
+}
+
 impl kanso::importer::Provider for TestImportProvider {
     fn info(&self) -> kanso::importer::ProviderInfo {
         use kanso::importer::{Filter, ProviderInfo, Source};
@@ -375,6 +625,7 @@ impl kanso::importer::Provider for TestImportProvider {
             title: title.into(),
             description: "<script>alert(1)</script> **hello**".into(),
             source_url: url.into(),
+            invalid_reason: None,
         };
         let candidates = vec![
             candidate("stable", "Original", "https://example.com/item"),

@@ -1570,6 +1570,31 @@ body.resizing-panel * {
   gap: 4px;
 }
 
+.github-repositories:not(:empty) {
+  margin-top: 16px;
+}
+
+.settings-row:has(.github-repositories:not(:empty)) {
+  align-items: flex-start;
+}
+
+.github-repository {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 10px 0;
+}
+
+.github-repository .input {
+  flex: 1 1 190px;
+  min-width: 0;
+}
+
+.github-repositories > button {
+  margin: 8px 8px 0 0;
+}
+
 .notification-switch {
   display: inline-flex;
   align-items: center;

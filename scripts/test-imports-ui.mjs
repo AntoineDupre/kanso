@@ -65,9 +65,44 @@ try {
     data: { project_id: project.id, title: "Verify imported detail", description: "<script>alert(1)</script> **External** task" }
   });
   assert.equal(localTask.status(), 201);
+  await page.goto(`${base}/settings/projects`);
+  const githubToggle = page.getByRole("button", { name: "GitHub repositories", exact: true });
+  let releaseRepositories;
+  const blockedRepositories = new Promise((resolve) => { releaseRepositories = resolve; });
+  const configPattern = "**/api/projects/*/github-repositories";
+  await page.route(configPattern, async (route) => { await blockedRepositories; await route.continue(); });
+  const requested = page.waitForRequest(configPattern);
+  await githubToggle.click();
+  await requested;
+  await githubToggle.click();
+  const response = page.waitForResponse(configPattern);
+  releaseRepositories();
+  await response;
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  assert.equal(await page.getByRole("button", { name: "Add repository", exact: true }).count(), 0);
+  await page.unroute(configPattern);
+  await githubToggle.click();
+  await page.getByRole("button", { name: "Add repository", exact: true }).click();
+  await page.getByLabel("GitHub repository", { exact: true }).fill("fixture/repository");
+  let releaseSave;
+  const blockedSave = new Promise((resolve) => { releaseSave = resolve; });
+  await page.route(configPattern, async (route) => { await blockedSave; await route.continue(); });
+  const saving = page.waitForRequest((request) => request.url().endsWith("/github-repositories") && request.method() === "PUT");
+  const save = page.getByRole("button", { name: "Save repositories", exact: true });
+  await save.click();
+  await saving;
+  assert.equal(await githubToggle.isDisabled(), true);
+  assert.equal(await save.isDisabled(), true);
+  releaseSave();
+  await page.getByText("GitHub repositories saved", { exact: true }).waitFor();
+  assert.equal(await githubToggle.isEnabled(), true);
+  await page.unroute(configPattern);
+  const configured = await page.request.get(`${base}/api/projects/${project.id}/github-repositories`);
+  assert.equal((await configured.json())[0].repository, "fixture/repository");
   await page.goto(`${base}/p/UIT`);
   await page.getByRole("button", { name: "Imports", exact: true }).click();
-  await page.getByText("Provider support is not yet available.", { exact: false }).waitFor();
+  await page.getByLabel("Provider", { exact: true }).waitFor();
+  assert.equal(await page.getByLabel("Provider", { exact: true }).locator('option[value="github"]').count(), 1);
   assert.equal(await page.getByRole("button", { name: "Import selected", exact: true }).count(), 0);
 
   const candidate = {
@@ -77,7 +112,7 @@ try {
   let previewNumber = 0;
   let failPreview = false;
   let confirmNumber = 0;
-  await page.route("**/api/imports/providers", (route) => route.fulfill({ json: [{
+  await page.route("**/api/imports/providers**", (route) => route.fulfill({ json: [{
     id: "browser-fixture", name: "Browser-only fixture",
     sources: [{ id: "source", name: "Example repository" }], filters: [{ id: "query", label: "Query" }]
   }] }));
@@ -123,6 +158,7 @@ try {
   assert.equal(await preview.isDisabled(), true);
   await destination.selectOption(project.id);
   await provider.selectOption("browser-fixture");
+  assert.equal(await page.getByLabel("GitHub category", { exact: true }).isVisible(), false);
   await source.selectOption("source");
   await page.getByLabel("Query", { exact: true }).fill("assigned to me");
   await preview.click();
@@ -165,7 +201,7 @@ try {
   assert.equal(await sourceLink.getAttribute("rel"), "noopener noreferrer");
   assert.equal(await page.locator("#panel-root script").count(), 0);
   assert.deepEqual(errors, []);
-  console.log("Imports real-browser verification passed (production empty state, selection, safe rendering, retry, invalidation, errors, desktop/mobile).");
+  console.log("Imports real-browser verification passed (production registration, selection, safe rendering, retry, invalidation, errors, desktop/mobile).");
 } finally {
   if (browser) await browser.close();
   server.kill("SIGTERM");

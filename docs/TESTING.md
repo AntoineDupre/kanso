@@ -12,12 +12,11 @@ node tests/imports_ui.mjs
 
 ## External task imports
 
-Production currently registers no cloud providers (the GitHub adapter belongs
-to KANSO-2). Open **Imports** from a project's toolbar: it must explain that
-provider support is not yet available without offering a working import button.
-`tests/api.rs` exercises the real API using an injected, test-only provider;
-`tests/imports_ui.mjs` covers selection, safe links, in-flight state, errors,
-and invalidation without browser dependencies and runs in CI.
+Production registers GitHub. `tests/api.rs` exercises project-scoped discovery,
+authorization and import using a test-only fixture; provider unit tests use
+mocked GitHub responses and subprocesses without live credentials.
+`tests/imports_ui.mjs` covers category/filter selection, safe links, in-flight
+state, errors, and invalidation without browser dependencies and runs in CI.
 
 For an optional real Chromium check, build the binary and install Playwright
 in your external test tooling, then run:
@@ -31,7 +30,7 @@ node scripts/test-imports-ui.mjs
 This uses disposable local data under `~/.cache/tmp/opencode`, disables the
 OpenChamber integration, and intercepts fixture-provider responses only inside
 the test browser. No live credential or production provider is required. It
-checks the real empty state and mocked preview/confirmation UI on desktop and
+checks production provider registration and mocked preview/confirmation UI on desktop and
 mobile, including unsafe text/links, duplicate-safe retry results, filter
 invalidation, and provider errors. Set `KANSO_IMPORTS_SCREENSHOTS=dist/review`
 to retain desktop/mobile screenshots. The mocked browser flow complements,

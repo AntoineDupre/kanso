@@ -16,6 +16,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v3.sql"),
     include_str!("migrations/v4.sql"),
     include_str!("migrations/v5.sql"),
+    include_str!("migrations/v6.sql"),
 ];
 
 /// Open the database and apply the connection-level pragmas.
@@ -265,7 +266,7 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("read user_version");
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
 
         let mut statement = connection
             .prepare(
@@ -286,6 +287,7 @@ mod tests {
                 "checklist",
                 "comments",
                 "dependencies",
+                "github_repositories",
                 "labels",
                 "projects",
                 "secret_requests",
@@ -328,13 +330,13 @@ mod tests {
         let path = dir.path().join("kanso.db");
         let mut connection = open(&path).expect("open database");
 
-        assert_eq!(migrate(&mut connection).expect("first migration"), 5);
-        assert_eq!(migrate(&mut connection).expect("second migration"), 5);
+        assert_eq!(migrate(&mut connection).expect("first migration"), 6);
+        assert_eq!(migrate(&mut connection).expect("second migration"), 6);
 
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("read user_version");
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     #[test]
@@ -359,7 +361,7 @@ mod tests {
             )
             .expect("seed v1 rows");
 
-        assert_eq!(migrate(&mut connection).expect("migrate to v5"), 5);
+        assert_eq!(migrate(&mut connection).expect("migrate to v6"), 6);
 
         let mut statement = connection
             .prepare("PRAGMA index_info('checklist_task')")
@@ -413,7 +415,7 @@ mod tests {
             )
             .expect("seed v2 rows");
 
-        assert_eq!(migrate(&mut connection).expect("migrate to v5"), 5);
+        assert_eq!(migrate(&mut connection).expect("migrate to v6"), 6);
 
         let mut statement = connection
             .prepare("PRAGMA table_info('comments')")
@@ -449,7 +451,7 @@ mod tests {
         let mut connection = open(&dir.path().join("kanso.db")).unwrap();
         apply(&mut connection, &MIGRATIONS[..4]).unwrap();
         connection.execute_batch("INSERT INTO projects (id,key,name,position,created_at,updated_at) VALUES ('p','ABC','Existing',1,1,1); INSERT INTO tasks (id,project_id,number,title,status,rank,created_at,updated_at) VALUES ('t','p',1,'Existing','todo',1,1,1), ('u','p',2,'Second','todo',2,1,1);").unwrap();
-        assert_eq!(migrate(&mut connection).unwrap(), 5);
+        assert_eq!(migrate(&mut connection).unwrap(), 6);
         assert_eq!(
             connection
                 .query_row("SELECT title FROM tasks WHERE id='t'", [], |r| r

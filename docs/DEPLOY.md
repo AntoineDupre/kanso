@@ -298,7 +298,7 @@ Open the URL, log in, and confirm the board loads. In the browser Network panel,
 comments; if it closes immediately, re-check the `location = /api/events`
 block and reload nginx after `nginx -t`.
 
-For the planned GitHub importer, authenticate the container's shared GitHub
+For the GitHub importer, authenticate the container's shared GitHub
 identity as the service user (not the operator's own Podman account):
 
 ```sh

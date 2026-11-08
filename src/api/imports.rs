@@ -6,7 +6,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::{now_millis, require_human, tasks, ApiError, ApiJson, Auth};
+use super::{now_millis, require_human, tasks, ApiError, ApiJson, ApiQuery, Auth};
 use crate::importer::{Candidate, Preview, ProviderInfo};
 use crate::{ids, rank, server::AppState};
 
@@ -75,7 +75,8 @@ fn safe_url(value: &str) -> bool {
 }
 
 fn valid_candidate(candidate: &Candidate) -> bool {
-    valid_metadata(&candidate.identity, 512)
+    candidate.invalid_reason.is_none()
+        && valid_metadata(&candidate.identity, 512)
         && valid_metadata(&candidate.kind, 128)
         && safe_url(&candidate.source_url)
         && tasks::validate_title(&candidate.title).is_ok()
@@ -85,7 +86,7 @@ fn valid_candidate(candidate: &Candidate) -> bool {
 fn usable_info(info: &ProviderInfo) -> bool {
     valid_metadata(&info.id, 128)
         && valid_metadata(&info.name, 200)
-        && info.sources.len() <= 100
+        && info.sources.len() <= 150
         && info.filters.len() <= 50
         && info
             .sources
@@ -97,12 +98,36 @@ fn usable_info(info: &ProviderInfo) -> bool {
             .all(|f| valid_metadata(&f.id, 128) && valid_metadata(&f.label, 200))
 }
 
+#[derive(Deserialize)]
+pub struct ProvidersQuery {
+    project_id: Option<String>,
+}
+
 pub async fn providers(
     State(state): State<AppState>,
     auth: Auth,
+    ApiQuery(query): ApiQuery<ProvidersQuery>,
 ) -> Result<Json<Vec<ProviderInfo>>, ApiError> {
     require_human(&auth.0)?;
-    let infos: Vec<_> = state.imports.providers.iter().map(|p| p.info()).collect();
+    let infos: Vec<_> = if let Some(project) = query.project_id {
+        if !active_project(&state, project.clone()).await? {
+            return Err(ApiError::validation(
+                "Destination project is missing or archived",
+            ));
+        }
+        let providers = state.imports.providers.clone();
+        state
+            .db
+            .call(move |db| {
+                providers
+                    .iter()
+                    .map(|p| p.project_info(db, &project))
+                    .collect::<crate::error::Result<Vec<_>>>()
+            })
+            .await?
+    } else {
+        state.imports.providers.iter().map(|p| p.info()).collect()
+    };
     if infos.iter().any(|info| !usable_info(info)) {
         return Err(ApiError::service_unavailable(
             "provider_error",
@@ -207,7 +232,12 @@ pub async fn preview(
         .find(|p| p.info().id == request.provider)
         .cloned()
         .ok_or_else(|| ApiError::validation("Unknown provider"))?;
-    let info = provider.info();
+    let info_provider = provider.clone();
+    let project = request.project_id.clone();
+    let info = state
+        .db
+        .call(move |db| info_provider.project_info(db, &project))
+        .await?;
     if !usable_info(&info)
         || !info.sources.iter().any(|s| s.id == request.source)
         || request.filters.len() > info.filters.len()
@@ -221,10 +251,11 @@ pub async fn preview(
     }
     let source = request.source.clone();
     let filters = request.filters;
+    let failure_message = provider.failure_message();
     let candidates = tokio::task::spawn_blocking(move || provider.preview(&source, &filters))
         .await
         .map_err(|_| ApiError::service_unavailable("provider_error", "Provider preview failed"))?
-        .map_err(|_| ApiError::service_unavailable("provider_error", "Provider preview failed"))?;
+        .map_err(|_| ApiError::service_unavailable("provider_error", failure_message))?;
     if candidates.len() > MAX_ITEMS
         || candidates
             .iter()
@@ -234,6 +265,7 @@ pub async fn preview(
                     + c.title.len()
                     + c.description.len()
                     + c.source_url.len()
+                    + c.invalid_reason.as_ref().map_or(0, String::len)
             })
             .sum::<usize>()
             > MAX_PREVIEW_BYTES
@@ -314,12 +346,15 @@ enum ImportResult {
     Created(Box<super::model::Task>),
     Existing(String),
     MissingProject,
+    DisabledSource,
 }
 
 fn import_candidate(
     db: &mut rusqlite::Connection,
     project: &str,
     provider: &str,
+    adapter: &dyn crate::importer::Provider,
+    source: &str,
     actor: &str,
     candidate: &Candidate,
 ) -> crate::error::Result<ImportResult> {
@@ -331,6 +366,14 @@ fn import_candidate(
     )?;
     if !project_exists {
         return Ok(ImportResult::MissingProject);
+    }
+    if !adapter
+        .project_info(&tx, project)?
+        .sources
+        .iter()
+        .any(|item| item.id == source)
+    {
+        return Ok(ImportResult::DisabledSource);
     }
 
     let existing: Option<String> = tx
@@ -441,6 +484,13 @@ pub async fn confirm(
             "Destination project is missing or archived",
         ));
     }
+    let adapter = state
+        .imports
+        .providers
+        .iter()
+        .find(|p| p.info().id == preview.provider)
+        .cloned()
+        .ok_or_else(|| ApiError::conflict("Provider is no longer available"))?;
     let mut outcomes = Vec::new();
     for index in request.selected {
         let candidate = preview.candidates[index].clone();
@@ -456,9 +506,21 @@ pub async fn confirm(
         let project = preview.project.clone();
         let provider = preview.provider.clone();
         let actor = auth.0.actor().to_owned();
+        let adapter = adapter.clone();
+        let source = preview.source.clone();
         let result = state
             .db
-            .call(move |db| import_candidate(db, &project, &provider, &actor, &candidate))
+            .call(move |db| {
+                import_candidate(
+                    db,
+                    &project,
+                    &provider,
+                    adapter.as_ref(),
+                    &source,
+                    &actor,
+                    &candidate,
+                )
+            })
             .await;
         match result {
             Ok(ImportResult::Created(task)) => {
@@ -476,6 +538,12 @@ pub async fn confirm(
                 status: "skipped",
                 reference: Some(reference),
                 message: None,
+            }),
+            Ok(ImportResult::DisabledSource) => outcomes.push(Outcome {
+                index,
+                status: "failed",
+                reference: None,
+                message: Some("Repository or category is no longer enabled"),
             }),
             _ => outcomes.push(Outcome {
                 index,

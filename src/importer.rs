@@ -1,9 +1,11 @@
-//! Provider-neutral external task previews. Production registers no providers.
+//! Provider-neutral external task previews.
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+
+pub mod github;
 
 /// All metadata is public and must never contain credentials.
 #[derive(Clone, Debug, Serialize)]
@@ -35,6 +37,9 @@ pub struct Candidate {
     pub title: String,
     pub description: String,
     pub source_url: String,
+    /// Explicitly rejected source content; never eligible for import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
 }
 
 #[derive(Debug)]
@@ -46,6 +51,18 @@ pub struct ProviderError;
 /// Provider errors are never exposed to clients.
 pub trait Provider: Send + Sync {
     fn info(&self) -> ProviderInfo;
+    fn failure_message(&self) -> &'static str {
+        "Provider preview failed"
+    }
+    /// Resolve public sources for a project while holding the database lock.
+    /// Must not perform network or subprocess I/O.
+    fn project_info(
+        &self,
+        _db: &rusqlite::Connection,
+        _project: &str,
+    ) -> crate::error::Result<ProviderInfo> {
+        Ok(self.info())
+    }
     fn preview(
         &self,
         source: &str,

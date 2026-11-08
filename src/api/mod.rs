@@ -30,6 +30,7 @@ mod dispatch;
 mod error;
 mod events;
 mod export;
+mod github_repositories;
 mod imports;
 mod inbox;
 mod integration;
@@ -391,6 +392,10 @@ pub fn routes() -> Router<AppState> {
             get(projects::get).patch(projects::update),
         )
         .route("/api/projects/{id}/archive", post(projects::archive))
+        .route(
+            "/api/projects/{id}/github-repositories",
+            get(github_repositories::list).put(github_repositories::replace),
+        )
         .route("/api/tasks", get(tasks::list).post(tasks::create))
         .route(
             "/api/tasks/{reference}",

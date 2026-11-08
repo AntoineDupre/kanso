@@ -189,7 +189,7 @@ podman run --rm -p 127.0.0.1:8087:8087 \
 The image is a multi-stage musl build on Alpine, runs as uid/gid 1000, keeps
 data in the `/data` volume, exposes port 8087 and probes `/api/health`.
 
-The image includes GitHub CLI for the planned GitHub importer. Its configuration lives
+The image includes GitHub CLI for the GitHub importer. Its configuration lives
 in `/data/.config/gh` (`GH_CONFIG_DIR`), so persist `/data` across container
 replacements. An operator can run `podman exec -it <container> gh auth login
 --hostname github.com --web --git-protocol https --skip-ssh-key` and

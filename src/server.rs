@@ -71,7 +71,9 @@ impl AppState {
             auth: Arc::new(auth),
             login_limiter: Arc::new(crate::auth::LoginLimiter::default()),
             events: Arc::new(EventBus::new(heartbeat)),
-            imports: Arc::new(crate::importer::Registry::default()),
+            imports: Arc::new(crate::importer::Registry::new(vec![Arc::new(
+                crate::importer::github::GitHub,
+            )])),
             openchamber: None,
             dispatch_in_flight: Arc::new(Mutex::new(HashSet::new())),
             health: Arc::new(Mutex::new(None)),
@@ -79,7 +81,7 @@ impl AppState {
         }
     }
 
-    /// Supply provider adapters. Production leaves the registry empty.
+    /// Override provider adapters, primarily for tests.
     pub fn with_import_providers(
         mut self,
         providers: Vec<Arc<dyn crate::importer::Provider>>,
