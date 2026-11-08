@@ -49,6 +49,10 @@ fn username(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == b'-')
 }
 
+fn author_filter(value: &str) -> bool {
+    username(value) || value.strip_suffix("[bot]").is_some_and(username)
+}
+
 pub(crate) fn valid_repository(value: &str) -> bool {
     let Some((owner, repo)) = value.split_once('/') else {
         return false;
@@ -309,7 +313,12 @@ fn fetch(
     }
     let selected = filters.get("user").map(String::as_str).unwrap_or(&me.login);
     if (selected.is_empty() && category != "issues")
-        || (!selected.is_empty() && !username(selected))
+        || (!selected.is_empty()
+            && !(if category == "follow" {
+                author_filter(selected)
+            } else {
+                username(selected)
+            }))
     {
         return Err(ProviderError);
     }
@@ -414,6 +423,8 @@ mod tests {
         merged["merged_at"] = json!("2026-01-01");
         let mut someone = item("someone", "other");
         someone["requested_reviewers"] = json!([user("alice")]);
+        let mut own_for_alice = item("own-for-alice", "me");
+        own_for_alice["requested_reviewers"] = json!([user("alice")]);
         let items = vec![
             item("yes", "other"),
             item("own", "me"),
@@ -422,6 +433,7 @@ mod tests {
             closed,
             merged,
             someone,
+            own_for_alice,
         ];
         let result = preview("review", HashMap::new(), items.clone()).unwrap();
         assert_eq!(
@@ -431,15 +443,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["yes"]
         );
+        let result = preview(
+            "review",
+            HashMap::from([("user".into(), "alice".into())]),
+            items,
+        )
+        .unwrap();
         assert_eq!(
-            preview(
-                "review",
-                HashMap::from([("user".into(), "alice".into())]),
-                items
-            )
-            .unwrap()[0]
-                .identity,
-            "someone"
+            result
+                .iter()
+                .map(|item| item.identity.as_str())
+                .collect::<Vec<_>>(),
+            ["someone"]
         );
     }
     #[test]
@@ -465,6 +480,43 @@ mod tests {
             .len(),
             1
         );
+    }
+    #[test]
+    fn follow_accepts_bot_author_logins_without_unsafe_characters() {
+        let mut bot = item("bot", "dependabot[bot]");
+        bot["user"]["type"] = json!("Bot");
+        let result = preview(
+            "follow",
+            HashMap::from([("user".into(), "dependabot[bot]".into())]),
+            vec![bot],
+        )
+        .unwrap();
+        assert_eq!(result[0].identity, "bot");
+        for invalid in [
+            "[bot]",
+            "-bad[bot]",
+            "dependabot[bot]/evil",
+            "dependabot[bot]--",
+            "dependabot[other]",
+            "a b[bot]",
+        ] {
+            assert!(
+                preview(
+                    "follow",
+                    HashMap::from([("user".into(), invalid.into())]),
+                    vec![]
+                )
+                .is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(preview(
+            "issues",
+            HashMap::from([("user".into(), "dependabot[bot]".into())]),
+            vec![]
+        )
+        .is_err());
+        assert!(!valid_repository("dependabot[bot]/repo"));
     }
     #[test]
     fn failures_and_page_limits_are_not_empty_successes() {

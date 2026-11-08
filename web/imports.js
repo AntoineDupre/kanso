@@ -137,9 +137,12 @@ export async function renderImports(region, projects, current, navigate) {
   }
   project.addEventListener("change", async () => {
     discovering = Boolean(project.value);
-    invalidate();
     const version = ++discoveryVersion;
-    if (!project.value) { controls(); return; }
+    providers = [];
+    if (!project.value) provider.value = "";
+    category.replaceChildren(el("option", { value: "", text: t("github.selectCategory") }));
+    controls();
+    if (!project.value) return;
     try {
       const scoped = await api.importProviders(project.value);
       if (!current() || version !== discoveryVersion) return;

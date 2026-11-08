@@ -160,6 +160,16 @@ try {
   await provider.selectOption("browser-fixture");
   assert.equal(await page.getByLabel("GitHub category", { exact: true }).isVisible(), false);
   await source.selectOption("source");
+  await destination.selectOption("");
+  assert.equal(await provider.inputValue(), "");
+  assert.equal(await source.inputValue(), "");
+  assert.equal(await source.locator("option").count(), 1);
+  assert.equal(await preview.isDisabled(), true);
+  await provider.selectOption("browser-fixture");
+  assert.equal(await source.locator("option").count(), 1);
+  await destination.selectOption(project.id);
+  await provider.selectOption("browser-fixture");
+  await source.selectOption("source");
   await page.getByLabel("Query", { exact: true }).fill("assigned to me");
   await preview.click();
   const choice = page.getByRole("checkbox", { name: `Select ${candidate.title}`, exact: true });
