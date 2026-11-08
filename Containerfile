@@ -19,7 +19,7 @@ RUN cargo build --release --locked
 
 FROM alpine:3.24 AS runtime
 
-RUN apk add --no-cache ca-certificates tzdata \
+RUN apk add --no-cache ca-certificates tzdata github-cli \
     && addgroup -g 1000 kanso \
     && adduser -D -u 1000 -G kanso -h /data -s /sbin/nologin kanso \
     && mkdir -p /data \
@@ -33,7 +33,8 @@ USER 1000:1000
 VOLUME ["/data"]
 EXPOSE 8087
 
-ENV KANSO_DATA_DIR=/data \
+ENV GH_CONFIG_DIR=/data/.config/gh \
+    KANSO_DATA_DIR=/data \
     KANSO_BIND=0.0.0.0:8087
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \

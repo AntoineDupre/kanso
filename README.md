@@ -189,6 +189,26 @@ podman run --rm -p 127.0.0.1:8087:8087 \
 The image is a multi-stage musl build on Alpine, runs as uid/gid 1000, keeps
 data in the `/data` volume, exposes port 8087 and probes `/api/health`.
 
+The image includes GitHub CLI for the planned GitHub importer. Its configuration lives
+in `/data/.config/gh` (`GH_CONFIG_DIR`), so persist `/data` across container
+replacements. An operator can run `podman exec -it <container> gh auth login
+--hostname github.com --web --git-protocol https --skip-ssh-key` and
+complete the browser/device flow; the login
+must run as the container's uid 1000 and use the same persisted `/data` as the
+server. For the rootless production service, invoke Podman as the service user
+with its `XDG_RUNTIME_DIR`, as shown in [the runbook](docs/DEPLOY.md). Browser
+approval can happen on another machine, but a separate host login does not
+automatically authenticate the container. All Kanso humans will share this
+GitHub identity. The standard gh login grants write-capable scopes: use a
+dedicated account with read-only access only to the intended repositories; do
+not grant it access to unrelated private repositories.
+
+GitHub CLI may store credentials in plaintext when no credential store is
+available. Restrict access to the volume and its backups, and do not expose or
+copy its gh configuration into the image, logs, or project files. For rootless
+Podman, verify that user-namespace ownership and volume permissions permit the
+container's uid 1000 to read and write this directory. Never print the token.
+
 ## Deployment
 
 The production image is `ghcr.io/dupremathieu/kanso:latest`; a `v*` git tag

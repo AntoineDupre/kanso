@@ -21,7 +21,7 @@ browser ──https──> nginx (host, TLS) ──http──> kanso (rootless c
 | Container image | `${KANSO_IMAGE}` |
 | Service user / home | `${KANSO_USER}` / `${KANSO_HOME}` |
 | Loopback port | `127.0.0.1:${KANSO_PORT}` |
-| Data | `${KANSO_HOME}/data` → `/data`, SQLite + `backups/` |
+| Data | `${KANSO_HOME}/data` → `/data`, SQLite, `backups/`, and optional GitHub CLI credentials |
 | Deployment values | `deploy/deploy.env` (gitignored; `deploy/deploy.env.example` committed) |
 | Quadlet source | `deploy/kanso.container.in` (rendered to `deploy/out/kanso.container`) |
 | Network unit | `deploy/kanso.network` (static) |
@@ -47,7 +47,11 @@ browser ──https──> nginx (host, TLS) ──http──> kanso (rootless c
   manager, and pass the same variable to manual `podman pull` commands. Never
   put a registry token in this repo.
 - Duplicati is already running on the host. Add `${KANSO_HOME}/data` to a job
-  after the first backup exists (section 6).
+  after the first backup exists (section 6). If GitHub CLI is authenticated,
+  this directory can contain plaintext credentials; protect and encrypt backups
+  accordingly, restrict restore access, and rotate credentials if exposed. A
+  database-only restore does not restore the gh login; authenticate again if
+  needed. Never commit or print its credential files.
 - Root actions go through the operator's normal `sudo`/`tsudo` path. The
   commands below use `sudo` for readability; use the approved wrapper if your
   host requires it.
@@ -293,6 +297,20 @@ Open the URL, log in, and confirm the board loads. In the browser Network panel,
 `/api/events` must stay open in `text/event-stream` and show `: heartbeat`
 comments; if it closes immediately, re-check the `location = /api/events`
 block and reload nginx after `nginx -t`.
+
+For the planned GitHub importer, authenticate the container's shared GitHub
+identity as the service user (not the operator's own Podman account):
+
+```sh
+sudo -u "${KANSO_USER}" -H env XDG_RUNTIME_DIR="/run/user/$(id -u "${KANSO_USER}")" \
+  podman exec -it kanso gh auth login --hostname github.com --web --git-protocol https --skip-ssh-key
+sudo -u "${KANSO_USER}" -H env XDG_RUNTIME_DIR="/run/user/$(id -u "${KANSO_USER}")" \
+  podman exec kanso gh auth status --hostname github.com
+```
+
+See the container section of the README for shared-account and credential
+storage precautions. `/data/.config/gh` remains there even if `KANSO_DATA_DIR`
+is overridden; it needs its own persistent, protected mount in that case.
 
 ## 6. Backups
 
