@@ -108,6 +108,8 @@ mod tests {
             "Never move a card to `done`",
             "kanso propose",
             "current worktree",
+            "has no label named `need_spec`",
+            "blocker flow to report what is missing",
             "| `3` |",
         ] {
             assert!(SKILL.contains(phrase), "{phrase}");

@@ -32,7 +32,7 @@ pub const MAX_MODEL_CHARS: usize = 200;
 /// Longest accepted agent name typed at dispatch.
 pub const MAX_DISPATCH_AGENT_CHARS: usize = 120;
 
-/// The built-in prompt template from PLAN §9.
+/// The built-in prompt template, extending the baseline in PLAN §9.
 pub const DEFAULT_PROMPT_TEMPLATE: &str = "You are working on card {{ref}}: {{title}}
 Project: {{project}}
 
@@ -1061,6 +1061,7 @@ mod tests {
         assert!(prompt.contains("kanso task show ALP-42"));
         assert!(prompt.contains("If it does not have the `need_spec` label"));
         assert!(prompt.contains("do not ask questions in chat or card comments"));
+        assert!(prompt.contains("use the blocker flow to report what is missing"));
     }
 
     #[test]
