@@ -230,6 +230,8 @@ export const messages = {
   "activity.rejected": "rejected the proposal",
   "activity.session_linked": "linked an agent session",
   "activity.dispatched": "dispatched the card to OpenChamber",
+  // Legacy kind: installations that predate KANSO-18 still have these rows.
+  "activity.auto_moved": "moved the card to review when the session went idle",
   "activity.session_idle": "session is idle",
   "activity.session_failed": "session failed",
   "activity.session_offline": "session went offline",

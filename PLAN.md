@@ -444,7 +444,7 @@ every 10 s for cards with a `session_id` not in a terminal state:
 | OpenChamber state | Kanso |
 | --- | --- |
 | `busy` / `retry` | `session_status=running`, card stays `in_progress` |
-| `idle` | `session_status=idle`, card stays `in_progress`; the agent moves it to `in_review` explicitly when the work is ready |
+| `idle` | `session_status=idle`, card stays `in_progress` and stays polled; the agent moves it to `in_review` explicitly when the work is ready |
 | `idle` + failed | `session_status=failed`, `attention=1`, card stays |
 | `waiting-permission` / `waiting-question` | `session_status=waiting`, `attention=1` |
 | unreachable (3 failures) | `session_status=offline`, `attention=1` |
