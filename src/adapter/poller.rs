@@ -101,7 +101,10 @@ impl Poller {
                      WHERE state = 'active'
                        AND session_id IS NOT NULL
                        AND session_directory IS NOT NULL
-                       AND session_status IN ('running', 'waiting')
+                       AND (
+                         session_status IN ('running', 'waiting')
+                         OR (session_status = 'idle' AND status = 'in_progress')
+                       )
                      ORDER BY id",
                 )?;
                 let cards = statement
@@ -391,12 +394,6 @@ pub fn spawn(state: AppState) {
     });
 }
 
-/// The terminal statuses that stop polling until a dispatch or manual link sets
-/// the card back to `running`.
-pub fn is_terminal(status: Option<&str>) -> bool {
-    matches!(status, Some("idle" | "failed" | "offline"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,16 +411,5 @@ mod tests {
         tracker.record_success("dir");
         assert_eq!(tracker.failures("dir"), 0);
         assert_eq!(tracker.failures("other"), 1);
-    }
-
-    #[test]
-    fn terminal_states_stop_polling() {
-        for status in ["idle", "failed", "offline"] {
-            assert!(is_terminal(Some(status)), "{status}");
-        }
-        for status in ["running", "waiting", "", "busy"] {
-            assert!(!is_terminal(Some(status)), "{status}");
-        }
-        assert!(!is_terminal(None));
     }
 }

@@ -2847,7 +2847,16 @@ async fn poller_keeps_a_busy_then_idle_session_in_progress() {
     assert!(kinds.contains(&"session_idle"), "{kinds:?}");
     assert!(!kinds.contains(&"auto_moved"), "{kinds:?}");
 
-    // Idle is terminal: another cycle does not touch the card again.
+    // A repeated idle observation does not touch the card again.
+    let idle = json!({
+        "sessions": [{
+            "id": "ses_poll",
+            "status": { "type": "idle" },
+            "outcome": "succeeded",
+            "time": { "created": 1, "busy": 100, "idle": 200 },
+        }]
+    });
+    mock.queue_list(200, idle);
     let activity_count = detail["activity"].as_array().expect("activity").len();
     app.poll().await;
     let detail = app.detail(&cookie, &reference).await;
@@ -2855,6 +2864,22 @@ async fn poller_keeps_a_busy_then_idle_session_in_progress() {
         detail["activity"].as_array().expect("activity").len(),
         activity_count
     );
+
+    // The card is still in_progress, so a resumed session is observed again.
+    mock.queue_list(
+        200,
+        json!({
+            "sessions": [{
+                "id": "ses_poll",
+                "status": { "type": "busy" },
+                "time": { "created": 1, "busy": 300 },
+            }]
+        }),
+    );
+    app.poll().await;
+    let detail = app.detail(&cookie, &reference).await;
+    assert_eq!(detail["session_status"], "running");
+    assert_eq!(detail["status"], "in_progress");
 }
 
 #[tokio::test]
@@ -2952,7 +2977,7 @@ async fn three_missing_sessions_mark_offline_and_attention() {
 }
 
 #[tokio::test]
-async fn poller_never_auto_moves_a_done_card() {
+async fn poller_keeps_a_done_card_done_when_the_session_goes_idle() {
     let (url, mock) = start_mock().await;
     let app = TestApp::new(Some(&url)).await;
     let cookie = app.login().await;
