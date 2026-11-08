@@ -303,6 +303,20 @@ fn json_stdout(output: &Output) -> Value {
     serde_json::from_str(&stdout(output)).expect("stdout is JSON")
 }
 
+fn label_names(value: &Value) -> Vec<String> {
+    let mut names: Vec<String> = value["labels"]
+        .as_array()
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| label["name"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
 fn create_project_and_card(server: &TestServer, human: &str) -> Value {
     let output = command(
         server,
@@ -988,6 +1002,134 @@ fn agent_attribution_session_links_and_proposals() {
     );
     assert_exit(&denied, 2);
     assert!(stderr(&denied).contains("forbidden"));
+}
+
+#[test]
+fn propose_and_task_add_attach_existing_labels() {
+    let server = TestServer::start();
+    let human = server.create_token("labels-human", "human");
+    let agent = server.create_token("labels-agent", "agent");
+    create_project_and_card(&server, &human);
+    let v1 = api_post(
+        &server,
+        &human,
+        "/api/labels",
+        json!({"name": "v1", "color": "#2563eb"}),
+    );
+    api_post(
+        &server,
+        &human,
+        "/api/labels",
+        json!({"name": "need_spec", "color": "#16a34a"}),
+    );
+    let v1_id = v1["id"].as_str().expect("label id");
+
+    // An agent token can tag a proposal; a repeated label is deduplicated.
+    let proposed = command(
+        &server,
+        Some(&agent),
+        &[
+            "propose",
+            "Tagged idea",
+            "--project",
+            "ALP",
+            "--label",
+            "v1",
+            "--label",
+            "need_spec",
+            "--label",
+            "v1",
+        ],
+    );
+    assert_exit(&proposed, 0);
+    assert!(
+        stdout(&proposed).contains("proposed"),
+        "{}",
+        stdout(&proposed)
+    );
+
+    let inbox = command(&server, Some(&human), &["inbox", "--json"]);
+    assert_exit(&inbox, 0);
+    let inbox = json_stdout(&inbox);
+    let tagged = inbox
+        .as_array()
+        .expect("inbox")
+        .iter()
+        .find(|task| task["title"] == "Tagged idea")
+        .expect("tagged proposal");
+    assert_eq!(label_names(tagged), ["need_spec", "v1"]);
+
+    // A human `task add` accepts a label id as well as a name.
+    let added = command(
+        &server,
+        Some(&human),
+        &[
+            "task",
+            "add",
+            "Tagged card",
+            "--project",
+            "ALP",
+            "--label",
+            v1_id,
+            "--label",
+            "v1",
+        ],
+    );
+    assert_exit(&added, 0);
+    let reference = stdout(&added)
+        .split_whitespace()
+        .nth(1)
+        .expect("reference")
+        .to_owned();
+    let shown = command(
+        &server,
+        Some(&human),
+        &["task", "show", &reference, "--json"],
+    );
+    assert_exit(&shown, 0);
+    assert_eq!(label_names(&json_stdout(&shown)), ["v1"]);
+
+    // An unknown label fails and creates nothing.
+    let unknown = command(
+        &server,
+        Some(&agent),
+        &["propose", "Bad idea", "--project", "ALP", "--label", "nope"],
+    );
+    assert_exit(&unknown, 2);
+    assert!(
+        stderr(&unknown).contains("unknown label"),
+        "{}",
+        stderr(&unknown)
+    );
+    let inbox = command(&server, Some(&human), &["inbox", "--json"]);
+    assert_exit(&inbox, 0);
+    let inbox = json_stdout(&inbox);
+    assert!(
+        inbox
+            .as_array()
+            .expect("inbox")
+            .iter()
+            .all(|task| task["title"] != "Bad idea"),
+        "{inbox}"
+    );
+
+    // Without --label the proposal is untagged, as before.
+    let plain = command(
+        &server,
+        Some(&agent),
+        &["propose", "Plain idea", "--project", "ALP"],
+    );
+    assert_exit(&plain, 0);
+    let inbox = command(&server, Some(&human), &["inbox", "--json"]);
+    assert_exit(&inbox, 0);
+    let inbox = json_stdout(&inbox);
+    let plain = inbox
+        .as_array()
+        .expect("inbox")
+        .iter()
+        .find(|task| task["title"] == "Plain idea")
+        .expect("plain proposal");
+    assert!(plain["labels"].as_array().expect("labels").is_empty());
 }
 
 #[test]

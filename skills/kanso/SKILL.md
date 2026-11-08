@@ -37,7 +37,9 @@ given: never create another worktree, change directory, or touch another card.
 - Never move a card to `done`. Review and completion are the human's decision.
 - Never delete or archive a card, and never change another card's priority.
 - Ideas discovered along the way go through `kanso propose "Idea" --project ALP
-  --description "…"`. Do not create cards directly.
+  --description "…"`. Add `--label NAME` for each existing label the proposal
+  needs; labels are never created implicitly, so an unknown name fails the call.
+  Do not create cards directly.
 - Do not accept or reject proposals, edit projects, or manage tokens.
 - If a command fails, read the exit code and the message on stderr; do not retry
   a conflict blindly.
@@ -71,7 +73,7 @@ kanso check ALP-42 --list
 kanso move ALP-42 in_review [--agent NAME]
 kanso move ALP-42 blocker --reason "…" [--agent NAME]
 kanso move ALP-42 restore
-kanso propose "Idea" --project ALP [--description "…"] [--agent NAME]
+kanso propose "Idea" --project ALP [--description "…"] [--label NAME|ID]… [--agent NAME]
 kanso inbox
 # human only, not part of the agent loop:
 kanso session link ALP-42 ses_… --directory /path/to/worktree

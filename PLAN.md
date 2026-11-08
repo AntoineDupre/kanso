@@ -327,7 +327,7 @@ kanso config init --url https://kanso.example --token kanso_…
 kanso project list | add | show | edit
 kanso task list [--project ALP] [--status todo] [--label x] [--mine] [--json]
 kanso task show ALP-42
-kanso task add "Title" --project ALP [--description "…"] [--status todo] [--priority high]
+kanso task add "Title" --project ALP [--description "…"] [--status todo] [--priority high] [--label NAME|ID]…
 kanso task edit ALP-42 [--title …] [--description …] [--due 2026-11-12]
 kanso next [--project ALP] [--claim]
 kanso claim ALP-42
@@ -336,7 +336,7 @@ kanso move ALP-42 in_review | blocker --reason "…" | restore
 kanso comment ALP-42 "text"            # or "-" to read stdin
 kanso check ALP-42 --add "item" | --done 2 | --list
 kanso depend ALP-42 on ALP-40
-kanso propose "Idea" --project ALP [--description "…"]
+kanso propose "Idea" --project ALP [--description "…"] [--label NAME|ID]…
 kanso inbox [--json]
 kanso session link ALP-42 ses_… --directory /path
 kanso token create --name build --scope agent   # prints the token once

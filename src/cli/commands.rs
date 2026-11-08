@@ -372,6 +372,7 @@ pub fn task(command: TaskCommand, json_output: bool) -> Result<(), CliError> {
             description,
             status,
             priority,
+            labels,
         } => {
             let mut body = Map::new();
             body.insert("project_key".to_owned(), json!(project));
@@ -384,6 +385,9 @@ pub fn task(command: TaskCommand, json_output: bool) -> Result<(), CliError> {
             }
             if let Some(priority) = priority {
                 body.insert("priority".to_owned(), json!(priority));
+            }
+            if !labels.is_empty() {
+                body.insert("labels".to_owned(), json!(labels));
             }
             let response = client.request(
                 Method::Post,
@@ -710,6 +714,7 @@ pub fn propose(
     title: String,
     project: String,
     description: Option<String>,
+    labels: Vec<String>,
     agent: Option<String>,
     json_output: bool,
 ) -> Result<(), CliError> {
@@ -719,6 +724,9 @@ pub fn propose(
     body.insert("title".to_owned(), json!(title));
     if let Some(description) = description {
         body.insert("description".to_owned(), json!(description));
+    }
+    if !labels.is_empty() {
+        body.insert("labels".to_owned(), json!(labels));
     }
     let response = client.request(
         Method::Post,

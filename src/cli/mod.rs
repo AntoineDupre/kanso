@@ -121,6 +121,9 @@ pub enum Command {
         project: String,
         #[arg(long)]
         description: Option<String>,
+        /// Label name or id to attach (repeatable).
+        #[arg(long = "label", value_name = "LABEL")]
+        labels: Vec<String>,
         /// Attribution name sent as X-Kanso-Agent.
         #[arg(long)]
         agent: Option<String>,
@@ -257,6 +260,9 @@ pub enum TaskCommand {
         status: Option<String>,
         #[arg(long)]
         priority: Option<String>,
+        /// Label name or id to attach (repeatable).
+        #[arg(long = "label", value_name = "LABEL")]
+        labels: Vec<String>,
     },
     /// Edit a card's title, description or due date.
     Edit {
@@ -436,8 +442,9 @@ pub fn run(cli: Cli) -> Result<(), CliError> {
             title,
             project,
             description,
+            labels,
             agent,
-        } => commands::propose(title, project, description, agent, json),
+        } => commands::propose(title, project, description, labels, agent, json),
         Command::Inbox => commands::inbox(json),
         Command::Session { command } => commands::session(command, json),
         Command::Token { command } => commands::token(command, json),
