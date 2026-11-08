@@ -1022,6 +1022,7 @@ function renderInboxPage() {
 // Settings
 
 function settingsHeader(active) {
+  const version = document.querySelector('meta[name="kanso-version"]')?.content;
   const projects = el(
     "a",
     { class: `settings-tab${active === "projects" ? " active" : ""}`, href: "/settings/projects" },
@@ -1067,6 +1068,7 @@ function settingsHeader(active) {
   return el("header", { class: "page-header" }, [
     el("div", {}, [
       el("h1", { class: "page-title", text: t("settings.title") }),
+      version ? el("p", { class: "settings-version", text: `Kanso v${version}` }) : null,
       el("nav", { class: "settings-tabs" }, [projects, tokens, integration, exportTab])
     ])
   ]);

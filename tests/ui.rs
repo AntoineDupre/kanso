@@ -52,6 +52,28 @@ fn secret_input_is_separate_from_drafts_and_refreshes_on_secret_events() {
     assert!(app.contains("state.panel.reload({ force: true })"));
 }
 
+#[tokio::test]
+async fn settings_version_uses_the_served_binary_version() {
+    let dir = TempDir::new();
+    let (_, _, body) = get(app(&dir), "/settings/projects").await;
+    let html = String::from_utf8(body).unwrap();
+    assert!(html.contains(&format!(
+        "<meta name=\"kanso-version\" content=\"{}\">",
+        env!("CARGO_PKG_VERSION")
+    )));
+
+    let script = std::fs::read_to_string(repository_web_dir().join("app.js")).unwrap();
+    let header = script
+        .split("function settingsHeader(active) {")
+        .nth(1)
+        .unwrap()
+        .split("async function renderSettingsProjects")
+        .next()
+        .unwrap();
+    assert!(header.contains("meta[name=\"kanso-version\"]"));
+    assert!(header.contains("class: \"settings-version\", text: `Kanso v${version}`"));
+}
+
 struct TempDir {
     path: PathBuf,
 }

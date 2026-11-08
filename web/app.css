@@ -1465,6 +1465,12 @@ body.resizing-panel * {
   color: var(--muted);
 }
 
+.settings-version {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .settings-tabs {
   display: flex;
   flex-wrap: wrap;
