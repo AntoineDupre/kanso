@@ -67,6 +67,46 @@ curl http://127.0.0.1:8087/api/health
 | `KANSO_OPENCHAMBER_URL` | no | — | OpenChamber base URL; enables the optional adapter only together with the token |
 | `KANSO_OPENCHAMBER_TOKEN` | no | — | `oc_client_…` bearer token for OpenChamber; never returned by the API |
 
+### OpenChamber connection
+
+A human can configure the URL and client token under **Settings → Integration**,
+then select **Test connection**. The test authenticates against OpenChamber's
+control API, unlike the public version/reachability probe. To rotate a revoked
+token, select **Replace token**, save the new token, and test again; subsequent
+dispatches use it immediately without restarting Kanso. Alternatively, after
+saving the OpenChamber URL, use **Regenerate token** with a fresh pairing-v2
+connection link from the same OpenChamber instance. Kanso redeems the link
+against the saved URL, stores the resulting token, and does not display it.
+Use HTTPS on untrusted networks: both the token and pairing secret are bearer
+credentials and can be intercepted over plain HTTP.
+
+Settings are stored in `<data_dir>/openchamber-connection.json`, with mode 0600
+on Unix. This file contains the token in plaintext: restrict access to the Kanso
+service account and protect any filesystem backups containing it. It is not
+included in Kanso's database backup or JSON export. Stored settings take
+precedence over the two environment variables, which remain the fallback when no
+settings have been saved.
+
+An OpenChamber client token is not the UI password. Issuing a new one requires
+an authenticated OpenChamber UI session to create a pairing session, or a
+one-time pairing link generated on the OpenChamber host with `openchamber
+connect-url`. A client redeems that pairing using
+`POST /api/client-auth/pairing/redeem`, receiving a client token once. Pairing
+links expire and are single-use; if redemption fails or its result is uncertain,
+create a new link. Kanso uses the configured URL, not relay candidates in the
+link. Treat the pairing link and token as secrets; use trusted tools and a secure
+channel.
+
+In OpenChamber's UI, create a link under **Settings → Remote Instances →
+Connect to this server → Add a device**, then paste it into Kanso's
+**Regenerate token** action. Ensure the saved Kanso URL reaches the same
+OpenChamber instance over a trusted connection.
+
+Ordinary OpenChamber client tokens cannot create other remote clients, so a
+revoked Kanso token cannot itself authorize regeneration. See the upstream
+[OpenChamber authentication documentation](https://github.com/openchamber/openchamber/blob/main/packages/web/server/lib/ui-auth/DOCUMENTATION.md)
+and [remote instance pairing guide](https://github.com/openchamber/openchamber/blob/main/packages/docs/content/docs/remote-instances.mdx).
+
 Logs go to stdout without ANSI colours, which is journald-friendly. SIGINT and
 SIGTERM trigger a graceful shutdown with a 10-second drain deadline.
 

@@ -33,7 +33,7 @@ mod export;
 mod github_repositories;
 mod imports;
 mod inbox;
-mod integration;
+pub(crate) mod integration;
 mod labels;
 pub(crate) mod model;
 mod projects;
@@ -386,6 +386,15 @@ pub fn routes() -> Router<AppState> {
         .route("/api/me", get(session::me))
         .route("/api/events", get(events::stream))
         .route("/api/integration", get(integration::status))
+        .route(
+            "/api/integration/openchamber",
+            axum::routing::put(integration::update),
+        )
+        .route("/api/integration/openchamber/test", post(integration::test))
+        .route(
+            "/api/integration/openchamber/regenerate",
+            post(integration::regenerate),
+        )
         .route("/api/projects", get(projects::list).post(projects::create))
         .route(
             "/api/projects/{id}",

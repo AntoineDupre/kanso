@@ -114,6 +114,40 @@ impl OpenChamber {
         &self.base
     }
 
+    pub(crate) fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Authenticate against the control API and verify the response shape.
+    pub async fn test_connection(&self) -> Result<(), OpenChamberError> {
+        let base = self.base.to_string();
+        let token = self.token.to_string();
+        tokio::task::spawn_blocking(move || {
+            // OpenChamber 2.6's session.list supports `limit`; one result is
+            // sufficient to verify authentication and the response contract.
+            let value = post_control(
+                &base,
+                &token,
+                &json!({"action":"session.list", "input":{"limit":1}}),
+                LIST_TIMEOUT,
+            )?;
+            let result = value.get("data").unwrap_or(&value);
+            if result.is_array()
+                || ["sessions", "items"]
+                    .iter()
+                    .any(|key| result.get(*key).is_some_and(Value::is_array))
+            {
+                Ok(())
+            } else {
+                Err(OpenChamberError::Protocol(
+                    "invalid session.list response".into(),
+                ))
+            }
+        })
+        .await
+        .map_err(|_| OpenChamberError::Transport("connection test failed".into()))?
+    }
+
     fn cached_probe(&self, now: Instant) -> Option<VersionInfo> {
         let cache = self.probe.lock().unwrap_or_else(|error| error.into_inner());
         cache.as_ref().and_then(|entry| {
@@ -205,7 +239,7 @@ impl OpenChamber {
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
                 .send(payload.to_string());
-            read_response(response).map(|_| ())
+            read_response(response, Some(&token)).map(|_| ())
         })
         .await
         .map_err(|error| OpenChamberError::Transport(error.to_string()))?
@@ -250,7 +284,7 @@ impl OpenChamber {
                 .unwrap_or_else(|error| Err(OpenChamberError::Transport(error.to_string())));
 
         match result {
-            Ok(value) => parse_prompt_dispatch(&value),
+            Ok(value) => parse_prompt_dispatch_redacted(&value, Some(&self.token)),
             Err(OpenChamberError::Http { status, message }) => PromptDelivery::Failed(
                 truncate_error(format!("OpenChamber returned HTTP {status}: {message}")),
             ),
@@ -283,6 +317,10 @@ pub fn build_session_send(session_id: &str, directory: &str, prompt: &str) -> Va
 
 /// Classify a 2xx `session.send` body.
 pub fn parse_prompt_dispatch(value: &Value) -> PromptDelivery {
+    parse_prompt_dispatch_redacted(value, None)
+}
+
+fn parse_prompt_dispatch_redacted(value: &Value, token: Option<&str>) -> PromptDelivery {
     // Some OpenChamber versions wrap the result in `data`; accept both shapes.
     let result = match value.get("data") {
         Some(data) if data.get("promptDispatched").is_some() => data,
@@ -293,6 +331,10 @@ pub fn parse_prompt_dispatch(value: &Value) -> PromptDelivery {
         Some(false) => {
             let message = string_field(result, &["promptError"])
                 .unwrap_or_else(|| "OpenChamber did not dispatch the prompt".to_owned());
+            let message = match token.filter(|token| !token.is_empty()) {
+                Some(token) => message.replace(token, "[redacted]"),
+                None => message,
+            };
             PromptDelivery::Failed(truncate_error(message))
         }
         None => PromptDelivery::Unknown(truncate_error(
@@ -357,7 +399,7 @@ fn probe_version(base: &str) -> VersionInfo {
         .get(&url)
         .header("Accept", "application/json")
         .call();
-    match read_response(response) {
+    match read_response(response, None) {
         Ok(value) => VersionInfo {
             reachable: true,
             version: string_field(&value, &["openchamberVersion", "version"]),
@@ -382,11 +424,12 @@ fn post_control(
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .send(payload.to_string());
-    read_response(response)
+    read_response(response, Some(token))
 }
 
 fn read_response(
     result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    secret: Option<&str>,
 ) -> Result<Value, OpenChamberError> {
     match result {
         Ok(mut response) => {
@@ -398,7 +441,10 @@ fn read_response(
             if !(200..300).contains(&status) {
                 return Err(OpenChamberError::Http {
                     status,
-                    message: error_message(&body),
+                    message: error_message(&match secret.filter(|s| !s.is_empty()) {
+                        Some(secret) => body.replace(secret, "[redacted]"),
+                        None => body,
+                    }),
                 });
             }
             if body.trim().is_empty() {

@@ -72,18 +72,13 @@ async fn serve(port: Option<u16>, data_dir: Option<PathBuf>) -> Result<(), CliEr
         "starting kanso"
     );
 
-    let mut state = server::AppState::new(database, web_dir, auth);
+    let state = server::AppState::new(database, web_dir, auth);
     crate::api::secret::spawn_cleanup(state.clone());
-    state.openchamber = config.openchamber.as_ref().map(|settings| {
-        std::sync::Arc::new(crate::adapter::openchamber::OpenChamber::new(
-            settings.url(),
-            settings.token(),
-        ))
-    });
-    if state.openchamber.is_some() {
-        crate::adapter::poller::spawn(state.clone());
-        tracing::info!("OpenChamber integration enabled; session polling started");
-    }
+    state.set_openchamber(config.openchamber.as_ref().map(|settings| {
+        crate::adapter::openchamber::OpenChamber::new(settings.url(), settings.token())
+    }));
+    crate::api::integration::load(&state).map_err(startup)?;
+    crate::adapter::poller::spawn(state.clone());
     let app = server::router(state);
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await

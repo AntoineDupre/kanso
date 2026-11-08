@@ -65,10 +65,10 @@ pub async fn dispatch(
     body: OptionalApiJson<DispatchBody>,
 ) -> Result<Json<TaskDetail>, ApiError> {
     require_human(&auth.0)?;
-    let openchamber = state.openchamber.clone().ok_or_else(|| {
+    let openchamber = state.openchamber().ok_or_else(|| {
         ApiError::service_unavailable(
             "integration_disabled",
-            "OpenChamber integration is disabled; set KANSO_OPENCHAMBER_URL and KANSO_OPENCHAMBER_TOKEN",
+            "OpenChamber integration is disabled; configure Settings > Integration or the environment",
         )
     })?;
 

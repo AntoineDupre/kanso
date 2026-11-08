@@ -107,7 +107,7 @@ pub async fn create(
         .token_id
         .clone()
         .ok_or_else(|| ApiError::forbidden("agent token required"))?;
-    if state.openchamber.is_none() {
+    if state.openchamber().is_none() {
         return Err(ApiError::service_unavailable(
             "integration_disabled",
             "OpenChamber integration is disabled",
@@ -600,7 +600,7 @@ async fn deliver_notification(
         Ok(Ok(Notification { task_id, session, directory, prompt }))
     }).await??;
 
-    let outcome = if let Some(adapter) = &state.openchamber {
+    let outcome = if let Some(adapter) = state.openchamber() {
         adapter
             .send_prompt(
                 &notification.session,

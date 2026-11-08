@@ -254,6 +254,15 @@ async fn mock_auto_accept(
     }
 }
 
+async fn mock_pairing(
+    State(mock): State<Mock>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Response {
+    mock.record("POST", "/api/client-auth/pairing/redeem", &headers, payload);
+    response(200, json!({"clientToken":"oc_client_paired"}))
+}
+
 async fn start_mock() -> (String, Mock) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -263,6 +272,7 @@ async fn start_mock() -> (String, Mock) {
     let app = Router::new()
         .route("/api/version", get(mock_version))
         .route("/api/openchamber/control", post(mock_control))
+        .route("/api/client-auth/pairing/redeem", post(mock_pairing))
         .route(
             "/api/permission-auto-accept/sessions/{id}",
             put(mock_auto_accept),
@@ -1268,6 +1278,364 @@ async fn integration_stays_reachable_false_when_the_version_probe_fails() {
     assert_eq!(integration.body["openchamber"]["enabled"], true);
     assert_eq!(integration.body["openchamber"]["reachable"], false);
     assert!(integration.body["openchamber"]["version"].is_null());
+}
+
+#[tokio::test]
+async fn rotation_tests_authentication_and_updates_dispatch_without_restart() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    mock.queue_list(401, json!({"error": "expired"}));
+    let failed = app
+        .post("/api/integration/openchamber/test", None, &cookie)
+        .await;
+    assert_eq!(failed.body["status"], "authentication_error");
+    assert_eq!(
+        app.get("/api/integration", &cookie).await.body["openchamber"]["reachable"],
+        true
+    );
+
+    let rotated = app
+        .request(
+            Method::PUT,
+            "/api/integration/openchamber",
+            Some(json!({"url": url, "token": "oc_client_replacement"})),
+            Some(&cookie),
+            Some(ORIGIN),
+        )
+        .await;
+    assert_eq!(rotated.status, StatusCode::NO_CONTENT);
+    assert!(!app
+        .get("/api/integration", &cookie)
+        .await
+        .body
+        .to_string()
+        .contains("oc_client_replacement"));
+    let tested = app
+        .post("/api/integration/openchamber/test", None, &cookie)
+        .await;
+    assert_eq!(tested.body["status"], "ok");
+    assert_eq!(
+        mock.list_requests().last().unwrap().body["input"]["limit"],
+        1
+    );
+    assert_eq!(
+        mock.list_requests()
+            .last()
+            .unwrap()
+            .authorization
+            .as_deref(),
+        Some("Bearer oc_client_replacement")
+    );
+
+    let project = app.create_project(&cookie, "ROT", "Rotation").await;
+    app.patch(
+        &format!("/api/projects/{}", project["id"].as_str().unwrap()),
+        json!({"repo_path": "/home/me/code/alpha"}),
+        &cookie,
+    )
+    .await;
+    let card = app
+        .create_card(&cookie, project["id"].as_str().unwrap(), "Dispatch")
+        .await;
+    let dispatched = app
+        .post(
+            &format!(
+                "/api/tasks/{}/dispatch",
+                card["reference"].as_str().unwrap()
+            ),
+            None,
+            &cookie,
+        )
+        .await;
+    assert!(dispatched.status.is_success(), "{:?}", dispatched.body);
+    assert_eq!(
+        mock.create_requests()
+            .last()
+            .unwrap()
+            .authorization
+            .as_deref(),
+        Some("Bearer oc_client_replacement")
+    );
+}
+
+#[tokio::test]
+async fn upstream_error_must_not_echo_the_write_only_token() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    mock.set_create(
+        401,
+        json!({"error": format!("rejected credential {TOKEN}")}),
+    );
+    let project = app.create_project(&cookie, "SEC", "Security").await;
+    app.patch(
+        &format!("/api/projects/{}", project["id"].as_str().unwrap()),
+        json!({"repo_path":"/home/me/code/alpha"}),
+        &cookie,
+    )
+    .await;
+    let card = app
+        .create_card(&cookie, project["id"].as_str().unwrap(), "Dispatch")
+        .await;
+    let result = app
+        .post(
+            &format!(
+                "/api/tasks/{}/dispatch",
+                card["reference"].as_str().unwrap()
+            ),
+            None,
+            &cookie,
+        )
+        .await;
+    assert_eq!(result.status, StatusCode::BAD_GATEWAY);
+    assert!(!result.body.to_string().contains(TOKEN));
+}
+
+#[tokio::test]
+async fn upstream_success_body_error_does_not_echo_token() {
+    let (url, mock) = start_mock().await;
+    mock.set_send(
+        200,
+        json!({"promptDispatched": false, "promptError": format!("rejected {TOKEN}")}),
+    );
+    let adapter = OpenChamber::new(&url, TOKEN);
+    let result = adapter
+        .send_prompt("ses_test", "/work", "hello", Duration::from_secs(2))
+        .await;
+    let text = format!("{result:?}");
+    assert!(!text.contains(TOKEN));
+    assert!(text.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn connection_test_classifies_invalid_protocol_and_requires_a_human() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    mock.queue_list(200, json!({"unexpected": true}));
+    let test = app
+        .post("/api/integration/openchamber/test", None, &cookie)
+        .await;
+    assert_eq!(test.body["status"], "protocol_error");
+    let agent = app
+        .post(
+            "/api/tokens",
+            Some(json!({"name":"settings-agent","scope":"agent"})),
+            &cookie,
+        )
+        .await;
+    let bearer = agent.body["token"].as_str().expect("agent token");
+    assert_eq!(
+        app.post_bearer("/api/integration/openchamber/test", None, bearer)
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+    let response = app
+        .send(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/integration/openchamber")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(header::CONTENT_TYPE, "application/json"),
+            Body::from(json!({"url":url,"token":"bad"}).to_string()),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn connection_test_reports_transport_failures_without_leaking_token() {
+    let app = TestApp::new(Some("http://127.0.0.1:1")).await;
+    let cookie = app.login().await;
+    let result = app
+        .post("/api/integration/openchamber/test", None, &cookie)
+        .await;
+    assert_eq!(result.body["status"], "transport_error");
+    assert!(!result.body.to_string().contains(TOKEN));
+}
+
+#[tokio::test]
+async fn settings_reject_invalid_urls_and_enforce_csrf() {
+    let app = TestApp::new(None).await;
+    let cookie = app.login().await;
+    for url in [
+        "https://name:pass@example.com",
+        "http://localhost/?token=secret",
+        "file:///etc/passwd",
+    ] {
+        let response = app
+            .request(
+                Method::PUT,
+                "/api/integration/openchamber",
+                Some(json!({"url":url,"token":"oc_client_test"})),
+                Some(&cookie),
+                Some(ORIGIN),
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    }
+    let response = app
+        .request(
+            Method::PUT,
+            "/api/integration/openchamber",
+            Some(json!({"url":"http://localhost:1234", "token":"oc_client_test"})),
+            Some(&cookie),
+            Some("https://attacker.example"),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::FORBIDDEN);
+    assert!(app.state.openchamber().is_none());
+}
+
+#[tokio::test]
+async fn changing_url_requires_a_new_token_and_does_not_redirect_the_old_one() {
+    let (url, _) = start_mock().await;
+    let (other_url, other) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let unchanged = app
+        .request(
+            Method::PUT,
+            "/api/integration/openchamber",
+            Some(json!({"url":url})),
+            Some(&cookie),
+            Some(ORIGIN),
+        )
+        .await;
+    assert_eq!(unchanged.status, StatusCode::NO_CONTENT);
+    assert!(!app._dir.path().join("openchamber-connection.json").exists());
+    let changed = app
+        .request(
+            Method::PUT,
+            "/api/integration/openchamber",
+            Some(json!({"url":other_url})),
+            Some(&cookie),
+            Some(ORIGIN),
+        )
+        .await;
+    assert_eq!(changed.status, StatusCode::BAD_REQUEST);
+    assert_eq!(app.state.openchamber().unwrap().url(), url);
+    assert!(other.requests().is_empty());
+}
+
+#[tokio::test]
+async fn pairing_regeneration_redeems_and_uses_new_token() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let encoded = URL_SAFE_NO_PAD.encode(
+        json!({"pairingId":"pair_test", "secret":"pairing_secret", "candidates":[]}).to_string(),
+    );
+    let link = format!("openchamber://connect?v=2&p={encoded}");
+    let result = app
+        .post(
+            "/api/integration/openchamber/regenerate",
+            Some(json!({"link":link})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(result.status, StatusCode::NO_CONTENT, "{:?}", result.body);
+    let request = mock
+        .requests()
+        .into_iter()
+        .find(|r| r.path == "/api/client-auth/pairing/redeem")
+        .expect("redeem request");
+    assert_eq!(request.body["pairingId"], "pair_test");
+    assert_eq!(
+        app.post("/api/integration/openchamber/test", None, &cookie)
+            .await
+            .body["status"],
+        "ok"
+    );
+    assert_eq!(
+        mock.list_requests()
+            .last()
+            .unwrap()
+            .authorization
+            .as_deref(),
+        Some("Bearer oc_client_paired")
+    );
+    assert!(!app
+        .get("/api/integration", &cookie)
+        .await
+        .body
+        .to_string()
+        .contains("oc_client_paired"));
+}
+
+#[tokio::test]
+async fn invalid_pairing_does_not_replace_existing_token() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let result = app
+        .post(
+            "/api/integration/openchamber/regenerate",
+            Some(json!({"link":"not a pairing link"})),
+            &cookie,
+        )
+        .await;
+    assert_eq!(result.status, StatusCode::BAD_REQUEST);
+    let _ = app
+        .post("/api/integration/openchamber/test", None, &cookie)
+        .await;
+    assert_eq!(
+        mock.list_requests()
+            .last()
+            .unwrap()
+            .authorization
+            .as_deref(),
+        Some(&format!("Bearer {TOKEN}")[..])
+    );
+    assert!(!mock
+        .requests()
+        .iter()
+        .any(|r| r.path == "/api/client-auth/pairing/redeem"));
+}
+
+#[tokio::test]
+async fn pairing_regeneration_requires_human_and_csrf_protection() {
+    let (url, mock) = start_mock().await;
+    let app = TestApp::new(Some(&url)).await;
+    let cookie = app.login().await;
+    let agent = app
+        .post(
+            "/api/tokens",
+            Some(json!({"name":"pairing-agent","scope":"agent"})),
+            &cookie,
+        )
+        .await;
+    let bearer = agent.body["token"].as_str().unwrap();
+    let body = Some(json!({"link":"example"}));
+    assert_eq!(
+        app.post_bearer(
+            "/api/integration/openchamber/regenerate",
+            body.clone(),
+            bearer
+        )
+        .await
+        .status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.request(
+            Method::POST,
+            "/api/integration/openchamber/regenerate",
+            body,
+            Some(&cookie),
+            Some("https://attacker.example")
+        )
+        .await
+        .status,
+        StatusCode::FORBIDDEN
+    );
+    assert!(!mock
+        .requests()
+        .iter()
+        .any(|r| r.path == "/api/client-auth/pairing/redeem"));
 }
 
 // ---------------------------------------------------------------------------

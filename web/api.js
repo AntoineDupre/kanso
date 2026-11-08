@@ -114,6 +114,9 @@ export const api = {
   logout: () => request("/api/auth/logout", { method: "POST" }),
 
   integration: () => request("/api/integration").catch(() => null),
+  saveOpenChamber: (body) => request("/api/integration/openchamber", { method: "PUT", body, secret: true }),
+  testOpenChamber: () => request("/api/integration/openchamber/test", { method: "POST" }),
+  regenerateOpenChamber: (link) => request("/api/integration/openchamber/regenerate", { method: "POST", body: { link }, secret: true }),
 
   importProviders: (projectId) => request(`/api/imports/providers${query({ project_id: projectId })}`),
   importPreview: (payload) => request("/api/imports/preview", { method: "POST", body: payload }),

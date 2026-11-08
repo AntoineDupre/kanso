@@ -33,8 +33,9 @@ pub struct AppState {
     pub login_limiter: Arc<crate::auth::LoginLimiter>,
     pub events: Arc<EventBus>,
     pub imports: Arc<crate::importer::Registry>,
-    /// Present only when both OpenChamber environment variables are set.
-    pub openchamber: Option<Arc<crate::adapter::openchamber::OpenChamber>>,
+    /// Shared so settings changes take effect for all handlers and the poller.
+    pub openchamber: Arc<Mutex<Option<Arc<crate::adapter::openchamber::OpenChamber>>>>,
+    pub openchamber_settings_lock: Arc<tokio::sync::Mutex<()>>,
     /// Task ids with an upstream dispatch in flight, so two clicks cannot
     /// create two sessions for the same card.
     dispatch_in_flight: Arc<Mutex<HashSet<String>>>,
@@ -74,7 +75,8 @@ impl AppState {
             imports: Arc::new(crate::importer::Registry::new(vec![Arc::new(
                 crate::importer::github::GitHub,
             )])),
-            openchamber: None,
+            openchamber: Arc::new(Mutex::new(None)),
+            openchamber_settings_lock: Arc::new(tokio::sync::Mutex::new(())),
             dispatch_in_flight: Arc::new(Mutex::new(HashSet::new())),
             health: Arc::new(Mutex::new(None)),
             health_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -92,12 +94,20 @@ impl AppState {
 
     /// Attach a configured OpenChamber adapter. `kanso serve` starts the
     /// background poller; tests can drive poll cycles deterministically.
-    pub fn with_openchamber(
-        mut self,
-        openchamber: crate::adapter::openchamber::OpenChamber,
-    ) -> Self {
-        self.openchamber = Some(Arc::new(openchamber));
+    pub fn with_openchamber(self, openchamber: crate::adapter::openchamber::OpenChamber) -> Self {
+        self.set_openchamber(Some(openchamber));
         self
+    }
+
+    pub fn openchamber(&self) -> Option<Arc<crate::adapter::openchamber::OpenChamber>> {
+        self.openchamber
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn set_openchamber(&self, value: Option<crate::adapter::openchamber::OpenChamber>) {
+        *self.openchamber.lock().unwrap_or_else(|e| e.into_inner()) = value.map(Arc::new);
     }
 
     /// Claim the dispatch slot for one card. The HTTP call can take minutes,

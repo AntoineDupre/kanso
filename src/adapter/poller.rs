@@ -89,7 +89,7 @@ impl Poller {
     /// One poll cycle: group the live sessions by directory, call
     /// `session.list` once per directory, then apply the mapping to each card.
     pub async fn poll_once(&mut self, state: &AppState) -> Result<()> {
-        let Some(openchamber) = state.openchamber.clone() else {
+        let Some(openchamber) = state.openchamber() else {
             return Ok(());
         };
 
@@ -375,8 +375,8 @@ fn publish(state: &AppState, task: Option<Task>) {
     }
 }
 
-/// Start the background poller. Call only when the integration is enabled and
-/// only once per process; a second call would create a second cycle loop.
+/// Start one background poller per process. It stays idle while disabled, and
+/// begins polling when settings enable the integration.
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         let mut poller = Poller::new();

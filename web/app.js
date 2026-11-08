@@ -1494,23 +1494,79 @@ async function renderSettingsIntegration(token) {
         )
       );
       page.append(rows);
-    } else {
-      page.append(
-        el("div", { class: "settings-list" }, [
-          integrationRow(
-            t("settings.integrationEnv"),
-            el("div", { class: "settings-env" }, [
-              el("code", { class: "settings-row-repo", text: "KANSO_OPENCHAMBER_URL" }),
-              el("code", { class: "settings-row-repo", text: "KANSO_OPENCHAMBER_TOKEN" }),
-              el("p", {
-                class: "field-hint",
-                text: t("settings.integrationEnvHint")
-              })
-            ])
-          )
-        ])
-      );
     }
+    const urlInput = el("input", { class: "input", type: "url", required: true, value: info.url || "", "aria-label": t("settings.integrationUrl") });
+    const tokenInput = el("input", { class: "input", type: "password", autocomplete: "new-password", "aria-label": t("settings.integrationToken"), placeholder: enabled ? "••••••••" : "" });
+    tokenInput.required = !enabled;
+    tokenInput.hidden = enabled;
+    const replace = el("button", { type: "button", class: "button", text: t("settings.integrationReplace") });
+    replace.hidden = !enabled;
+    let replacingToken = false;
+    replace.addEventListener("click", () => { replacingToken = true; tokenInput.hidden = false; tokenInput.required = true; replace.hidden = true; tokenInput.focus(); });
+    const result = el("p", { class: "field-hint", role: "status" });
+    const save = el("button", { type: "submit", class: "button button-primary", text: t("settings.integrationSave") });
+    const test = el("button", { type: "button", class: "button", text: t("settings.integrationTest") });
+    test.disabled = !enabled;
+    const pairingInput = el("input", { class: "input", type: "password", autocomplete: "off", "aria-label": t("settings.integrationPairingLink"), placeholder: t("settings.integrationPairingLink") });
+    pairingInput.hidden = true;
+    const regenerate = el("button", { type: "button", class: "button", text: t("settings.integrationRegenerate") });
+    regenerate.disabled = !enabled;
+    urlInput.addEventListener("input", () => {
+      if (enabled && urlInput.value.trim().replace(/\/$/, "") !== (info.url || "").replace(/\/$/, "")) {
+        tokenInput.hidden = false;
+        tokenInput.required = true;
+        replace.hidden = true;
+        result.textContent = t("settings.integrationUrlChanged");
+      } else if (enabled && !replacingToken) {
+        tokenInput.value = "";
+        tokenInput.hidden = true;
+        tokenInput.required = false;
+        replace.hidden = false;
+        result.textContent = "";
+      }
+    });
+    const form = el("form", { class: "settings-list" }, [
+      integrationRow(t("settings.integrationUrl"), urlInput),
+      integrationRow(t("settings.integrationToken"), el("div", {}, [tokenInput, replace])),
+      el("p", { class: "field-hint", text: t("settings.integrationMintHint") }),
+      el("div", {}, [save, test, regenerate]), pairingInput, result
+    ]);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      save.disabled = true;
+      try {
+        const payload = { url: urlInput.value };
+        if (!tokenInput.hidden) payload.token = tokenInput.value;
+        await api.saveOpenChamber(payload);
+        tokenInput.value = "";
+        await renderSettingsIntegration(token);
+      } catch (error) { result.textContent = error.message; }
+      finally { save.disabled = false; }
+    });
+    test.addEventListener("click", async () => {
+      test.disabled = true;
+      try { const response = await api.testOpenChamber(); result.textContent = t(`settings.integrationTest.${response.status}`); }
+      catch (error) { result.textContent = error.message; }
+      finally { test.disabled = false; }
+    });
+    regenerate.addEventListener("click", async () => {
+      if (pairingInput.hidden) {
+        pairingInput.hidden = false;
+        pairingInput.focus();
+        result.textContent = t("settings.integrationPairingHint");
+        return;
+      }
+      if (!pairingInput.value.trim()) { result.textContent = t("settings.integrationPairingHint"); return; }
+      regenerate.disabled = true;
+      try {
+        await api.regenerateOpenChamber(pairingInput.value.trim());
+        pairingInput.value = "";
+        pairingInput.hidden = true;
+        result.textContent = t("settings.integrationRegenerated");
+      } catch (error) { pairingInput.value = ""; result.textContent = error.message; }
+      finally { regenerate.disabled = false; }
+    });
+    page.append(form);
     state.dom.pageRegion.replaceChildren(page);
   } catch (error) {
     if (state.routeToken !== token) return;

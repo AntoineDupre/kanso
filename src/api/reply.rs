@@ -89,7 +89,7 @@ struct StoredReply {
 fn integration_disabled() -> ApiError {
     ApiError::service_unavailable(
         "integration_disabled",
-        "OpenChamber integration is disabled; set KANSO_OPENCHAMBER_URL and KANSO_OPENCHAMBER_TOKEN",
+        "OpenChamber integration is disabled; configure Settings > Integration or the environment",
     )
 }
 
@@ -138,7 +138,7 @@ pub async fn create(
     let Some(session_id) = task.session_id.clone() else {
         return Err(reply_no_session());
     };
-    let openchamber = state.openchamber.clone().ok_or_else(integration_disabled)?;
+    let openchamber = state.openchamber().ok_or_else(integration_disabled)?;
 
     let comment_id = ids::uuid_v4()?;
     let author = auth.0.actor().to_owned();
@@ -226,7 +226,7 @@ pub async fn retry(
             "this comment is not a forwarded reply",
         ));
     };
-    let openchamber = state.openchamber.clone().ok_or_else(integration_disabled)?;
+    let openchamber = state.openchamber().ok_or_else(integration_disabled)?;
 
     let request = DeliveryRequest {
         task_id: task.id.clone(),
