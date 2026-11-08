@@ -19,7 +19,9 @@ RUN cargo build --release --locked
 
 FROM alpine:3.24 AS runtime
 
-RUN apk add --no-cache ca-certificates tzdata github-cli \
+# Device-flow output is validated for gh 2.97.0. Review and re-test this pin
+# before updating the Alpine package or broadening the supported CLI range.
+RUN apk add --no-cache ca-certificates tzdata 'github-cli=2.97.0-r2' \
     && addgroup -g 1000 kanso \
     && adduser -D -u 1000 -G kanso -h /data -s /sbin/nologin kanso \
     && mkdir -p /data \

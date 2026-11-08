@@ -114,6 +114,11 @@ export const api = {
   logout: () => request("/api/auth/logout", { method: "POST" }),
 
   integration: () => request("/api/integration").catch(() => null),
+  githubStatus: () => request("/api/github/status", { secret: true }),
+  githubRefresh: () => request("/api/github/status", { method: "POST", secret: true }),
+  githubProgress: () => request("/api/github/login", { secret: true }),
+  githubStart: (confirmed) => request("/api/github/login", { method: "POST", body: { confirmed }, secret: true }),
+  githubCancel: () => request("/api/github/login", { method: "DELETE", secret: true }),
   saveOpenChamber: (body) => request("/api/integration/openchamber", { method: "PUT", body, secret: true }),
   testOpenChamber: () => request("/api/integration/openchamber/test", { method: "POST" }),
   regenerateOpenChamber: (link) => request("/api/integration/openchamber/regenerate", { method: "POST", body: { link }, secret: true }),

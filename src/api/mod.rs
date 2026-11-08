@@ -30,6 +30,7 @@ mod dispatch;
 mod error;
 mod events;
 mod export;
+mod github_auth;
 mod github_repositories;
 mod imports;
 mod inbox;
@@ -378,6 +379,16 @@ pub fn response_with_cookie(status: axum::http::StatusCode, cookie: &str) -> Res
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/github/status",
+            get(github_auth::status).post(github_auth::refresh),
+        )
+        .route(
+            "/api/github/login",
+            get(github_auth::progress)
+                .post(github_auth::start)
+                .delete(github_auth::cancel),
+        )
         .route("/api/imports/providers", get(imports::providers))
         .route("/api/imports/preview", post(imports::preview))
         .route("/api/imports/confirm", post(imports::confirm))

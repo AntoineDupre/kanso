@@ -23,6 +23,12 @@ with screenshots, and a review deployment at kanso.dupre49.fr.
 
 ## Authentication
 
+**KANSO-22 supersession:** the operator-only/browser-connect restriction below
+describes the original importer milestone. Global connection management now
+also offers the separately approved, asynchronous browser device-login flow;
+it does not initiate login from preview/import requests. The other importer
+constraints in this document remain in force.
+
 - Use installed GitHub CLI (`gh`) with its existing authentication; do not add
   a Kanso-managed token, OAuth app, or browser Connect GitHub flow.
 - The operator logs gh into github.com using its browser login under the same

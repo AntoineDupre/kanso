@@ -17,19 +17,29 @@ static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Every asset the shell needs, with its expected content type exercised by the
 /// serving test. New web modules must be added here.
-const MODULES: [&str; 11] = [
+const MODULES: [&str; 12] = [
     "/app.css",
     "/app.js",
     "/api.js",
     "/board.js",
     "/panel.js",
     "/imports.js",
+    "/github-settings.js",
     "/forms.js",
     "/dom.js",
     "/i18n/en.js",
     "/i18n/index.js",
     "/vendor/marked.min.js",
 ];
+
+#[test]
+fn github_device_screen_does_not_use_persistent_browser_storage() {
+    let screen = std::fs::read_to_string(repository_web_dir().join("github-settings.js")).unwrap();
+    assert!(!screen.contains("localStorage"));
+    assert!(!screen.contains("sessionStorage"));
+    assert!(screen.contains("https://github.com/login/device"));
+    assert!(screen.contains("navigator.clipboard.writeText"));
+}
 
 #[test]
 fn secret_input_is_separate_from_drafts_and_refreshes_on_secret_events() {

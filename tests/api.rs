@@ -14,6 +14,66 @@ use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse";
 const ORIGIN: &str = "https://kanso.example";
+
+#[tokio::test]
+async fn github_auth_requires_a_human_session_csrf_and_no_store() {
+    let app = TestApp::new();
+    let cookie = app.login().await;
+    let agent = app.create_token(&cookie, "device-agent", "agent").await;
+    let human = app.create_token(&cookie, "device-human", "human").await;
+    for (method, path, body) in [
+        (Method::GET, "/api/github/status", None),
+        (Method::GET, "/api/github/login", None),
+        (
+            Method::POST,
+            "/api/github/login",
+            Some(json!({"confirmed": false})),
+        ),
+        (Method::DELETE, "/api/github/login", None),
+    ] {
+        let response = app
+            .request(method, path, body, None, agent["token"].as_str(), None)
+            .await;
+        assert_eq!(response.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.headers.get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+    }
+    let response = app
+        .get("/api/github/login", None, human["token"].as_str())
+        .await;
+    assert_eq!(response.status, StatusCode::FORBIDDEN);
+    let response = app.get("/api/github/login", None, None).await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers.get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let response = app
+        .request(
+            Method::POST,
+            "/api/github/login",
+            Some(json!({"confirmed": false})),
+            Some(&cookie),
+            None,
+            Some("https://evil.example"),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::FORBIDDEN);
+    assert_eq!(response.code(), "csrf");
+    assert_eq!(
+        response.headers.get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let response = app.get("/api/github/login", Some(&cookie), None).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body["state"], "idle");
+    assert_eq!(
+        response.headers.get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+}
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 struct TempDir {

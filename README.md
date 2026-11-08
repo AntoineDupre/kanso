@@ -231,7 +231,10 @@ data in the `/data` volume, exposes port 8087 and probes `/api/health`.
 
 The image includes GitHub CLI for the GitHub importer. Its configuration lives
 in `/data/.config/gh` (`GH_CONFIG_DIR`), so persist `/data` across container
-replacements. An operator can run `podman exec -it <container> gh auth login
+replacements. Humans can connect the shared account in **Settings → Integration**
+when the installed CLI version is supported; see [GitHub setup](docs/IMPORTS.md#github)
+for version requirements, limitations and fallback. Alternatively, an operator
+can run `podman exec -it <container> gh auth login
 --hostname github.com --web --git-protocol https --skip-ssh-key` and
 complete the browser/device flow; the login
 must run as the container's uid 1000 and use the same persisted `/data` as the
@@ -277,8 +280,10 @@ and `internal` (500), plus the specific conflict codes `already_claimed`,
 `not_proposed`, `already_dispatched`, `not_blocked`, `no_session`,
 `not_a_reply` and `already_sent`. The optional OpenChamber adapter adds
 `integration_disabled`/`integration_unreachable` (503) and
-`openchamber_error` (502). `GET /api/health` and `POST /api/auth/login` are public; every
-other `/api` route needs a session cookie or `Authorization: Bearer kanso_...`.
+`openchamber_error` (502). `GET /api/health` and `POST /api/auth/login` are
+public; other `/api` routes need a session cookie or `Authorization: Bearer
+kanso_...`, except GitHub connection management, which requires a human browser
+session cookie and rejects all bearer tokens.
 
 ### Authentication and meta
 
@@ -290,6 +295,8 @@ other `/api` route needs a session cookie or `Authorization: Bearer kanso_...`.
 | `GET` | `/api/health` | `{status, version, db}` |
 | `GET` | `/api/events` | Server-Sent Events; cookie or bearer auth |
 | `GET` | `/api/integration` | `{openchamber:{enabled,url,reachable,version}}`; disabled is `{enabled:false}` |
+| `GET` / `POST` | `/api/github/status` | Human browser session only; cached status / explicit refresh, `Cache-Control: no-store` |
+| `GET` / `POST` / `DELETE` | `/api/github/login` | Human browser session only; progress, start `{confirmed}`, or cancel the session's own attempt; `Cache-Control: no-store` |
 
 Failed logins are limited to five per minute per client address (`429`,
 `rate_limited`). Cookie-authenticated `POST`/`PATCH`/`DELETE` requests must carry

@@ -35,18 +35,52 @@ manual and read-only: there is no sync, monitoring, notification, automatic
 transition, or GitHub write. Comments, reviews, attachments and Actions logs
 are not copied.
 
-Install `gh` and authenticate to github.com with its browser login as the same
-OS user and environment as the Kanso server. All humans share that identity;
-“me” is not the Kanso user. A login on a laptop is not a login for a remote
-server. On a non-container host, the operator can run
+GitHub connection management is global under **Settings → Integration**; all
+projects and people share the same active account. “Me” is not the current
+Kanso user. Connect opens GitHub's device flow and reconnect requires explicit
+confirmation of this global impact. A single login can run at a time. Its code
+is visible only to the browser session that started it; a refresh in that
+session resumes the local attempt. Cancel stops the local process but cannot
+revoke an authorization already granted to GitHub. Browser login requires gh
+2.97.0, the version tested for headless device-code output. Other versions fail
+safely and use the operator-login fallback below. Kanso does not run login in
+an import request and never asks for a token or device code in a comment.
+The container pins Alpine's `github-cli=2.97.0-r2`; an unavailable pinned
+package makes the image build fail rather than silently enabling an untested
+adapter. Re-test the headless flow before changing the pin.
+
+![Desktop GitHub connection settings during a fixture login](screenshots/kanso-22/desktop.png)
+
+![Mobile GitHub connection settings during a fixture login](screenshots/kanso-22/mobile.png)
+
+These screenshots and the desktop/mobile browser checks use a disposable local
+server and a fake CLI. The displayed code is synthetic; no real GitHub device
+authorization or credential was used. Checks covered copy, same-session reload,
+another session's restricted view, and cancellation. The fake CLI was scoped to
+that disposable server and was never installed into the review instance.
+To repeat the browser checks after `cargo build --bin kanso`, run
+`PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node scripts/test-github-settings.mjs`.
+Set `KANSO_GH_SCREENSHOTS` to an existing output directory to regenerate the
+two fixture screenshots. The script creates and removes its own isolated data
+and fake CLI under `~/.cache/tmp/opencode`.
+
+Install `gh` and authenticate to github.com as the same OS user and environment
+as the Kanso server. A login on a laptop is not a login for a remote server.
+Alternatively, on a non-container host, the operator can run
 `gh auth login --hostname github.com --web --git-protocol https --skip-ssh-key`
 as that server user and complete the device flow in a browser. The
 [container instructions](../README.md#container) and
 [deployment runbook](DEPLOY.md) cover persistence, rootless uid mapping and
-credential protection. Kanso never starts login from a request. If preview
-fails, check that `gh` is installed and authenticated and that the account can
-read the linked repository. No subprocess diagnostics or credentials are
-returned to the browser.
+credential protection. `gh` may fall back to storing credentials unencrypted;
+protect the persistent volume and its backups. GitHub's default `gh` grant may
+allow writes even though Kanso's importer is read-only. If `GH_TOKEN` or
+`GITHUB_TOKEN` supplies the active credential, Kanso displays operator-managed
+authentication and disables browser reconnect; change that environment through
+the operator instead. If status or login is unavailable, the CLI is missing or
+incompatible, or its output is unexpected, use the operator shell login above.
+If preview fails, check that `gh` is authenticated and that the account can read
+the linked repository. No raw subprocess diagnostics or credentials are returned
+to the browser.
 
 The GitHub adapter bounds each preview to 30 seconds, three pages of 100
 remote records, 4 MiB per response, and 200 matching candidates. An incomplete
@@ -98,6 +132,13 @@ and `POST /api/imports/confirm`; all require human authorization and use normal
 cookie CSRF protection. Providers are trusted server-side code, not plugins or
 client-supplied candidates. `tests/api.rs` contains a test-only adapter and
 exercises the end-to-end flow without cloud access.
+
+Connection management uses `GET /api/github/status` (cached status),
+`POST /api/github/status` (refresh), and `GET`, `POST` or `DELETE
+/api/github/login` (progress, start with `{"confirmed":true|false}`, cancel).
+These endpoints require a human browser session cookie, reject all bearer
+tokens, return `Cache-Control: no-store`, and use normal cookie CSRF protection
+for mutations. Device material is returned only to the starting session.
 
 ## API workflow
 

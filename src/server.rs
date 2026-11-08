@@ -33,6 +33,7 @@ pub struct AppState {
     pub login_limiter: Arc<crate::auth::LoginLimiter>,
     pub events: Arc<EventBus>,
     pub imports: Arc<crate::importer::Registry>,
+    pub(crate) github_auth: Arc<crate::github_auth::Manager>,
     /// Shared so settings changes take effect for all handlers and the poller.
     pub openchamber: Arc<Mutex<Option<Arc<crate::adapter::openchamber::OpenChamber>>>>,
     pub openchamber_settings_lock: Arc<tokio::sync::Mutex<()>>,
@@ -75,6 +76,7 @@ impl AppState {
             imports: Arc::new(crate::importer::Registry::new(vec![Arc::new(
                 crate::importer::github::GitHub,
             )])),
+            github_auth: Arc::new(crate::github_auth::Manager::default()),
             openchamber: Arc::new(Mutex::new(None)),
             openchamber_settings_lock: Arc::new(tokio::sync::Mutex::new(())),
             dispatch_in_flight: Arc::new(Mutex::new(HashSet::new())),

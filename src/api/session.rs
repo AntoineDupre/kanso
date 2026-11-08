@@ -58,6 +58,7 @@ pub async fn logout(
     Auth(identity): Auth,
 ) -> Result<Response, ApiError> {
     if let Some(session_id) = identity.session_id {
+        state.github_auth.cancel(&session_id).await;
         state
             .db
             .call(move |connection| {

@@ -8,6 +8,7 @@ pub mod dependencies;
 pub mod error;
 pub mod events;
 pub mod fileutil;
+mod github_auth;
 pub mod ids;
 pub mod importer;
 pub mod rank;

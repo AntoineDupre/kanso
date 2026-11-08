@@ -298,8 +298,10 @@ Open the URL, log in, and confirm the board loads. In the browser Network panel,
 comments; if it closes immediately, re-check the `location = /api/events`
 block and reload nginx after `nginx -t`.
 
-For the GitHub importer, authenticate the container's shared GitHub
-identity as the service user (not the operator's own Podman account):
+For the GitHub importer, humans can connect the shared identity from global
+**Settings → Integration** when the installed `gh` version is supported (see
+[GitHub import setup](IMPORTS.md#github)). Alternatively, authenticate as the
+container's service user (not the operator's own Podman account):
 
 ```sh
 sudo -u "${KANSO_USER}" -H env XDG_RUNTIME_DIR="/run/user/$(id -u "${KANSO_USER}")" \
@@ -311,6 +313,9 @@ sudo -u "${KANSO_USER}" -H env XDG_RUNTIME_DIR="/run/user/$(id -u "${KANSO_USER}
 See the container section of the README for shared-account and credential
 storage precautions. `/data/.config/gh` remains there even if `KANSO_DATA_DIR`
 is overridden; it needs its own persistent, protected mount in that case.
+Environment-provided `GH_TOKEN` or `GITHUB_TOKEN` overrides stored login and is
+operator-managed; browser reconnect is disabled in that case. Both the shared
+account and its potentially unencrypted credential affect every Kanso project.
 
 ## 6. Backups
 

@@ -79,6 +79,7 @@ async fn serve(port: Option<u16>, data_dir: Option<PathBuf>) -> Result<(), CliEr
     }));
     crate::api::integration::load(&state).map_err(startup)?;
     crate::adapter::poller::spawn(state.clone());
+    let github_auth = state.github_auth.clone();
     let app = server::router(state);
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
@@ -94,6 +95,7 @@ async fn serve(port: Option<u16>, data_dir: Option<PathBuf>) -> Result<(), CliEr
     let shutdown = async move {
         server::shutdown_signal().await;
         let _ = shutdown_started_tx.send(());
+        github_auth.shutdown().await;
     };
     let server = axum::serve(
         listener,

@@ -1576,6 +1576,13 @@ body.resizing-panel * {
   gap: 4px;
 }
 
+.github-auth-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
 .github-repositories:not(:empty) {
   margin-top: 16px;
 }

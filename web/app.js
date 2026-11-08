@@ -15,6 +15,7 @@ import {
 import { createBoardView } from "./board.js";
 import { Panel } from "./panel.js";
 import { renderImports } from "./imports.js";
+import { githubSettings } from "./github-settings.js";
 import {
   openCardForm,
   openProjectForm,
@@ -1408,6 +1409,10 @@ async function renderSettingsIntegration(token) {
     state.dom.pageRegion.replaceChildren(page);
     return;
   }
+  const mountGithub = () => page.insertBefore(
+    githubSettings(() => state.routeToken === token && page.isConnected),
+    page.children[1] || null
+  );
   state.dom.pageRegion.replaceChildren(
     el("div", { class: "page-loading" }, [
       el("span", { class: "spinner", "aria-hidden": "true" }),
@@ -1436,6 +1441,7 @@ async function renderSettingsIntegration(token) {
         ])
       );
       state.dom.pageRegion.replaceChildren(page);
+      mountGithub();
       return;
     }
     const info = response.openchamber;
@@ -1568,6 +1574,7 @@ async function renderSettingsIntegration(token) {
     });
     page.append(form);
     state.dom.pageRegion.replaceChildren(page);
+    mountGithub();
   } catch (error) {
     if (state.routeToken !== token) return;
     if (error.status !== 401) showLoadError(error);
