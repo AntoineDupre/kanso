@@ -45,7 +45,7 @@ try {
     server.once("error", (error) => { clearTimeout(timeout); reject(error); });
     server.once("exit", () => { clearTimeout(timeout); reject(new Error("Local Kanso exited")); });
   });
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true, channel: "chromium" });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -243,8 +243,12 @@ try {
   assert.ok(gitlabRepositories.some((repo) => repo.instance === "https://gitlab.example:8443" && !repo.review));
   const githubStillConfigured = await page.request.get(`${base}/api/projects/${project.id}/github-repositories`);
   assert.equal((await githubStillConfigured.json())[0].repository, "fixture/repository");
+  if (screenshots) await page.screenshot({ path: join(resolve(screenshots), "gitlab-settings-desktop.png"), fullPage: true });
   await page.setViewportSize({ width: 360, height: 780 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  const mobileGitlabInput = await gitlabPanel.getByLabel("GitLab project path", { exact: true }).first().boundingBox();
+  assert.ok(mobileGitlabInput.width >= 200, `GitLab project input is too narrow: ${mobileGitlabInput.width}px`);
+  assert.ok(mobileGitlabInput.x >= 0 && mobileGitlabInput.x + mobileGitlabInput.width <= 360);
   if (screenshots) await page.screenshot({ path: join(resolve(screenshots), "gitlab-settings-mobile.png"), fullPage: true });
   await page.setViewportSize({ width: 1280, height: 900 });
   // Edit one path and remove the other, then persist a second time.

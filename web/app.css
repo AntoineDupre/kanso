@@ -2325,6 +2325,15 @@ body.resizing-panel * {
     align-items: flex-start;
   }
 
+  .project-settings-row {
+    display: grid;
+    grid-template-columns: 10px minmax(0, 1fr);
+  }
+
+  .project-settings-row > .settings-row-actions {
+    grid-column: 2;
+  }
+
   .modal-backdrop {
     padding: 10px;
   }

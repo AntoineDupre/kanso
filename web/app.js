@@ -1230,7 +1230,7 @@ function renderProjectRow(project, archived, human, refresh) {
       );
     }
   }
-  return el("article", { class: "settings-row" }, [
+  return el("article", { class: "settings-row project-settings-row" }, [
     el("span", { class: "project-dot", style: { "--project-color": project.color } }),
     el("div", { class: "settings-row-main" }, [
       el("div", { class: "settings-row-title" }, [
