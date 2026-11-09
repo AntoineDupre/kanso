@@ -12,9 +12,13 @@ node tests/imports_ui.mjs
 
 ## External task imports
 
-Production registers GitHub. `tests/api.rs` exercises project-scoped discovery,
+Production registers GitHub and GitLab. `tests/api.rs` exercises project-scoped discovery,
 authorization and import using a test-only fixture; provider unit tests use
 mocked GitHub responses and subprocesses without live credentials.
+GitLab tests additionally cover nested repository paths, multiple instances,
+configuration authorization and CSRF, immutable import identity, and isolated
+REST/GraphQL fixtures. See [KANSO-1 delivery notes](KANSO-1-SPEC.md) for the
+verified compatibility boundary and exact commands/results.
 `tests/imports_ui.mjs` covers category/filter selection, safe links, in-flight
 state, errors, and invalidation without browser dependencies and runs in CI.
 
@@ -27,11 +31,14 @@ node scripts/test-imports-ui.mjs
 # Or set PLAYWRIGHT_MODULE to an installed Playwright index.mjs.
 ```
 
-This uses disposable local data under `~/.cache/tmp/opencode`, disables the
+This uses disposable local data under the system temporary directory (`TMPDIR`
+or `/tmp`) and removes it on exit. It disables the
 OpenChamber integration, and intercepts fixture-provider responses only inside
 the test browser. No live credential or production provider is required. It
 checks production provider registration and mocked preview/confirmation UI on desktop and
-mobile, including unsafe text/links, duplicate-safe retry results, filter
+mobile, including actual GitHub/GitLab configuration CRUD and coexistence,
+GitLab default/explicit/all-assignee filters and all three categories,
+unsafe text/links, duplicate-safe retry results, filter
 invalidation, and provider errors. Set `KANSO_IMPORTS_SCREENSHOTS=dist/review`
 to retain desktop/mobile screenshots. The mocked browser flow complements,
 but does not replace, the Rust API tests.

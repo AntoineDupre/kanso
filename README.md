@@ -1,6 +1,6 @@
 # Kanso
 
-External task imports: see [Imports](docs/IMPORTS.md). Provider support is not yet enabled.
+Manual GitHub and GitLab imports: see [Imports](docs/IMPORTS.md).
 
 A single-user kanban board for your projects, with **optional** OpenCode /
 OpenChamber agent sessions.
@@ -253,6 +253,11 @@ Podman, verify that user-namespace ownership and volume permissions permit the
 container's uid 1000 to read and write this directory. Never print the token.
 
 ## Deployment
+
+GitLab imports use an operator-provisioned token file in the server environment,
+including inside containers. No GitLab CLI or browser login is required. See
+[GitLab setup](docs/IMPORTS.md#gitlab) and the
+[Podman instructions](docs/DEPLOY.md#gitlab-authentication) for secret mounts.
 
 The production image is `ghcr.io/dupremathieu/kanso:latest`; a `v*` git tag
 also publishes that tag and attaches the static

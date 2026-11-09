@@ -13,6 +13,10 @@ PublishPort=127.0.0.1:__KANSO_PORT__:8087
 Network=kanso.network
 EnvironmentFile=%h/.config/containers/systemd/kanso.env
 Volume=__KANSO_HOME__/data:/data:Z
+# Optional GitLab imports: provision this file separately with restricted
+# permissions and ownership readable by container uid 1000, then uncomment:
+# Volume=__KANSO_HOME__/.config/kanso/gitlab-tokens.json:/run/secrets/gitlab-tokens.json:ro,Z
+# Also set KANSO_GITLAB_TOKENS_FILE in kanso.env; see docs/DEPLOY.md.
 # SQLite and VACUUM INTO would otherwise create 0644 files readable by every
 # local account; the container's umask makes the database and dumps 0600.
 PodmanArgs=--umask=0077

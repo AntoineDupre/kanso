@@ -95,10 +95,108 @@ silently claim that a partial result is complete. After changing repository perm
 request a new preview. Never paste tokens into a repository name, username
 filter, task, comment, or diagnostic report.
 
+## GitLab
+
+In **Settings → Projects**, open **GitLab repositories** and add the instance
+origin, for example `https://gitlab.com` or `https://gitlab.example.org:8443`,
+and project path, for example `engineering/platform/service`. Enable **Issues**,
+**Merge requests to review** and **Merge requests to follow** independently.
+Save to add, edit or remove links. Multiple repositories and instances can
+coexist with the project's existing GitHub links. Only HTTPS origins without
+credentials, query strings, fragments or path prefixes are accepted; nested
+groups belong in the separate project path.
+
+![GitLab repository settings on desktop](screenshots/kanso-1/gitlab-settings-desktop.png)
+
+![GitLab merge-request preview](screenshots/kanso-1/gitlab-imports-desktop.png)
+
+These screenshots use fictional repositories and isolated browser fixtures.
+Mobile [settings](screenshots/kanso-1/gitlab-settings-mobile.png) and
+[preview](screenshots/kanso-1/gitlab-imports-mobile.png) were also verified.
+
+On **Imports**, select GitLab, a configured source and an enabled category.
+Blank username means the account authenticated on that GitLab instance,
+shared by all Kanso humans. Issues default to open issues assigned to that
+account; an explicit username selects a different assignee, and **All issue
+assignees** removes the assignee restriction. Merge requests to review are
+open, non-draft requests with a current review request for the selected user;
+the authenticated account's own requests are excluded even when selecting a
+different reviewer. Review state is checked through GraphQL, including reviews
+that have started but have not finished. Completed reviews are excluded until
+re-requested. Merge requests to follow are open requests authored by the
+selected user and include drafts. Assignee filtering is never used as a
+substitute for reviewer filtering.
+
+Preview, explicit selection, confirmation and per-item outcomes are the same
+as other providers. A preview creates no cards. Identities combine the GitLab
+instance and immutable remote identifiers, so changing a repository path or
+switching merge-request categories does not duplicate an imported card in the
+same destination project. Existing local edits and archived cards are
+preserved. The source link and provenance appear in task details and exports.
+Imports use read-only requests; no remote writes, cloning, background sync or
+automatic completion are performed.
+
+### Server authentication
+
+Provision a classic personal access token with `read_api` scope for each
+instance. Its account needs access to the repositories and issue/MR features
+being imported. Use a dedicated account with only the intended repository
+access. The browser does not accept or store GitLab tokens.
+
+Set `KANSO_GITLAB_TOKENS_FILE` in the **Kanso server's** environment to the
+absolute path of an operator-managed JSON file with instance origins as keys
+and token strings as values. This illustrative shape contains placeholders:
+
+```json
+{
+  "https://gitlab.com": "<token provisioned outside Kanso>",
+  "https://gitlab.example.org:8443": "<separate instance token>"
+}
+```
+
+Keep the real file outside the repository and Kanso data/export directory,
+readable only by the service account (mode `0600` on a host). Do not paste it
+into cards, comments, chat or diagnostics. For containers, mount it read-only
+and use the path **inside the container**; see
+[GitLab authentication with Podman](DEPLOY.md#gitlab-authentication).
+The same hostname must be configured in settings and the token map; aliases
+are distinct instances. Changing the token file takes effect on a new preview.
+
+Missing, malformed or inaccessible credentials, denied repository access,
+unsupported API fields and incomplete responses cause a sanitized preview
+failure. Check the server's token-file setting and mount, the token's validity
+and scope, repository visibility, and API capabilities, then request a new
+preview. Raw upstream errors and token values are never returned to the
+browser. A login performed on another machine does not configure this server.
+
+### Compatibility and limits
+
+The supported target is GitLab.com and HTTPS self-managed GitLab **17.11+**
+with REST API v4 and GraphQL review-state support. This baseline is verified
+against the API schema/source and isolated fixtures, not live release instances.
+The exact compatibility boundary and verified checks are recorded in
+[the delivery notes](KANSO-1-SPEC.md).
+Instances lacking required GraphQL review fields fail explicitly rather than
+returning a misleading empty review list. HTTP instances, installations under
+a URL path prefix, browser login and fine-grained access tokens are outside
+this implementation. Project paths and username filters use ASCII characters.
+HTTPS must validate against the bundled public trust
+roots; private CA trust is not configured by this adapter.
+
+Each preview has a 30-second overall deadline, at most three pages of 100
+remote items, a 4 MiB response limit and at most 200 candidates. Reviewer
+connections must also be complete within their bound. Failed, malformed or
+incomplete queries return an error; partial results are never presented as a
+successful empty preview. Oversized individual content is marked invalid.
+Narrow the repository/query if limits are exceeded. Configuration is checked
+again at confirmation; unlinking a source or disabling its category prevents
+confirmation of an old preview. No live GitLab credential is required by the
+isolated verification suite.
+
 ## Provider extension contract
 
 Implement `importer::Provider` and register it in the server's `AppState` via
-`with_import_providers`. Production registers the GitHub adapter. `info()`
+`with_import_providers`. Production registers the GitHub and GitLab adapters. `info()`
 describes public, non-secret provider metadata, source choices and text filter
 controls; `project_info()` may resolve sources from local configuration under
 the database lock and must not perform remote I/O. `preview()` validates filter semantics and performs remote I/O on a
@@ -201,3 +299,14 @@ Humans can inspect or replace a project's complete repository configuration via
 objects such as `{"repository":"owner/repo","issues":true,"review":false,"follow":true}`.
 The list is replaced atomically; repository names are unique case-insensitively.
 An empty list unlinks all repositories. Cookie requests require CSRF protection.
+
+GitLab configuration uses `GET` or `PUT
+/api/projects/<id>/gitlab-repositories` with an array of
+`{"instance":"https://gitlab.com","repository":"group/subgroup/project","issues":true,"review":true,"follow":false}`.
+PUT replaces the list atomically (maximum 50 repositories), canonicalizing
+instance origins; an empty array removes all GitLab links. GitHub links are
+managed independently. GitLab source IDs are
+`https://instance|group/subgroup/project|issues`, `...|review` or `...|follow`.
+The `user` filter follows the same omitted/default, explicit username and
+empty/all-issue-assignees semantics described above. Only enabled categories
+are discoverable, and source configuration is rechecked at confirmation.

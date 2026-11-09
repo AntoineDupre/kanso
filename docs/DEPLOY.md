@@ -199,6 +199,56 @@ sudo stat -c '%a %U:%G %n' ${KANSO_HOME}/.config/containers/systemd/kanso.env
 # 600 ${KANSO_USER}:${KANSO_USER} ...
 ```
 
+### GitLab authentication
+
+GitLab is optional and uses the server's HTTP client, without an additional
+CLI. Provision a classic personal access token with `read_api` and repository
+access on each GitLab instance. See [the token-map format](IMPORTS.md#server-authentication).
+Keep the real file outside both the repository and `${KANSO_HOME}/data`, so
+normal database exports and backups do not acquire these credentials.
+
+For this rootless deployment, place the token map at
+`${KANSO_HOME}/.config/kanso/gitlab-tokens.json`, in a restricted directory.
+Provision its contents through your secret-management tooling; do not put
+actual tokens in shell commands, comments or diagnostic output. Make the
+file readable by container uid 1000, using the same namespace ownership
+procedure as `/data`:
+
+```sh
+sudo -u "${KANSO_USER}" -H env XDG_RUNTIME_DIR="/run/user/$(id -u "${KANSO_USER}")" \
+  podman unshare chown 1000:1000 ${KANSO_HOME}/.config/kanso/gitlab-tokens.json
+sudo chmod 0600 ${KANSO_HOME}/.config/kanso/gitlab-tokens.json
+```
+
+Uncomment the example read-only `Volume=` in the installed Quadlet (or add
+the equivalent):
+
+```ini
+Volume=/actual/service/home/.config/kanso/gitlab-tokens.json:/run/secrets/gitlab-tokens.json:ro,Z
+```
+
+Set this non-secret setting in the installed `kanso.env`:
+
+```ini
+KANSO_GITLAB_TOKENS_FILE=/run/secrets/gitlab-tokens.json
+```
+
+For an ad-hoc Podman run, the corresponding options are
+`-v /absolute/host/gitlab-tokens.json:/run/secrets/gitlab-tokens.json:ro,Z`
+and `-e KANSO_GITLAB_TOKENS_FILE=/run/secrets/gitlab-tokens.json`.
+Mount only the file, never the containing host home directory. Its namespace
+ownership must permit the image's uid 1000 to read it. With Podman-managed
+secrets, set the secret target, uid and mode to provide the equivalent
+read-only file. Database restoration does not restore this secret mount.
+
+Reload the user daemon and restart the service after changing its Quadlet or
+environment. New previews read the token file again; after an atomic file
+replacement, a file bind mount can still refer to the previous inode, so
+recreate/restart the container to pick up the replacement. Configure GitLab
+repositories in project settings, then preview an import to verify access.
+A sanitized error points to authentication, permissions, API compatibility or
+query limits; do not collect or paste the token file or upstream diagnostics.
+
 ## 4. Pull the image and start the service
 
 Run Podman as the service user. `XDG_RUNTIME_DIR` is needed outside a login
