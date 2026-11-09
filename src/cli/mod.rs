@@ -148,7 +148,10 @@ pub enum Command {
         /// Install it under <dir>/kanso/SKILL.md.
         #[arg(long, conflicts_with = "print")]
         install: bool,
-        /// Install directory (default ~/.config/opencode/skills).
+        /// Agent target (default opencode; codex uses ~/.agents/skills).
+        #[arg(long, value_enum, requires = "install", conflicts_with = "print")]
+        target: Option<crate::skill::InstallTarget>,
+        /// Install directory, overriding the target's default.
         #[arg(long)]
         dir: Option<PathBuf>,
     },
@@ -451,8 +454,9 @@ pub fn run(cli: Cli) -> Result<(), CliError> {
         Command::Skill {
             print,
             install,
+            target,
             dir,
-        } => commands::skill(print, install, dir, json),
+        } => commands::skill(print, install, target, dir, json),
         Command::Backup { out } => commands::backup(out, json),
     };
     result?;

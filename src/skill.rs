@@ -7,6 +7,13 @@ use crate::fileutil;
 /// The skill shipped with the binary and installed by `kanso skill install`.
 pub const SKILL: &str = include_str!("../skills/kanso/SKILL.md");
 
+/// Agent-specific default parent directory for the shared Kanso skill.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum InstallTarget {
+    Opencode,
+    Codex,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum InstallOutcome {
     Created,
@@ -25,6 +32,10 @@ impl InstallOutcome {
 }
 
 pub fn default_dir() -> Result<PathBuf, CliError> {
+    default_dir_for(InstallTarget::Opencode)
+}
+
+pub fn default_dir_for(target: InstallTarget) -> Result<PathBuf, CliError> {
     let home = std::env::var("HOME")
         .ok()
         .map(|value| value.trim().to_owned())
@@ -32,10 +43,11 @@ pub fn default_dir() -> Result<PathBuf, CliError> {
         .ok_or_else(|| {
             CliError::usage("HOME is not set; pass --dir to choose where to install the skill")
         })?;
-    Ok(PathBuf::from(home)
-        .join(".config")
-        .join("opencode")
-        .join("skills"))
+    let home = PathBuf::from(home);
+    Ok(match target {
+        InstallTarget::Opencode => home.join(".config").join("opencode").join("skills"),
+        InstallTarget::Codex => home.join(".agents").join("skills"),
+    })
 }
 
 /// Write `<dir>/kanso/SKILL.md`, creating parents, and report what happened.

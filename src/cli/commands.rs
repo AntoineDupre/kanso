@@ -902,6 +902,7 @@ pub fn token(command: TokenCommand, json_output: bool) -> Result<(), CliError> {
 pub fn skill(
     print: bool,
     install: bool,
+    target: Option<skill::InstallTarget>,
     dir: Option<std::path::PathBuf>,
     _json_output: bool,
 ) -> Result<(), CliError> {
@@ -911,7 +912,10 @@ pub fn skill(
     if install {
         let base = match dir {
             Some(dir) => dir,
-            None => skill::default_dir()?,
+            None => match target {
+                Some(target) => skill::default_dir_for(target)?,
+                None => skill::default_dir()?,
+            },
         };
         let (path, outcome) = skill::install(&base)?;
         outln!("{}: {}", outcome.as_str(), path.display());
