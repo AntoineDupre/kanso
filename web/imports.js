@@ -88,8 +88,11 @@ export async function renderImports(region, projects, current, navigate) {
   let allLabel = null;
   let discovering = false;
   let discoveryVersion = 0;
+  const repositoryProvider = () => ["github", "gitlab"].includes(provider.value);
+  const sourceRepository = (id) => id.slice(0, id.lastIndexOf("|"));
+  const sourceCategory = (id) => id.slice(id.lastIndexOf("|") + 1);
   function selectedSource() {
-    return provider.value === "github" ? (source.value && category.value ? `${source.value}|${category.value}` : "") : source.value;
+    return repositoryProvider() ? (source.value && category.value ? `${source.value}|${category.value}` : "") : source.value;
   }
   function invalidate() {
     generation += 1;
@@ -100,21 +103,23 @@ export async function renderImports(region, projects, current, navigate) {
   }
   function controls() {
     const selected = providers.find((providerInfo) => providerInfo.id === provider.value);
-    const github = provider.value === "github";
-    categoryField.hidden = !github;
+    const repository = repositoryProvider();
+    const namespace = provider.value;
+    categoryField.hidden = !repository;
+    category.setAttribute("aria-label", t(`${repository ? namespace : "github"}.categoryLabel`));
     const sources = selected?.sources || [];
-    const repositories = [...new Set(sources.map((item) => item.id.split("|")[0]))];
+    const repositories = [...new Set(sources.map((item) => sourceRepository(item.id)))];
     source.replaceChildren(
       el("option", { value: "", text: t("imports.selectSource") }),
-      ...(github ? repositories.map((name) => el("option", { value: name, text: name })) : sources.map((sourceInfo) => el("option", { value: sourceInfo.id, text: sourceInfo.name })))
+      ...(repository ? repositories.map((name) => el("option", { value: name, text: name.replace("|", " · ") })) : sources.map((sourceInfo) => el("option", { value: sourceInfo.id, text: sourceInfo.name })))
     );
     filters = (selected?.filters || []).map((filter) => ({
       id: filter.id,
-      label: github ? t("github.username") : filter.label,
-      input: el("input", { class: "input", type: "text", "aria-label": github ? t("github.username") : filter.label, placeholder: github ? t("github.usernameHint") : "", onInput: invalidate })
+      label: repository ? t(`${namespace}.username`) : filter.label,
+      input: el("input", { class: "input", type: "text", "aria-label": repository ? t(`${namespace}.username`) : filter.label, placeholder: repository ? t(`${namespace}.usernameHint`) : "", onInput: invalidate })
     }));
-    allAssignees = github ? el("input", { type: "checkbox", "aria-label": t("github.allAssignees"), onChange: () => { if (filters[0]) filters[0].input.disabled = allAssignees.checked; invalidate(); } }) : null;
-    allLabel = github ? el("label", { class: "field-hint", hidden: true }, [allAssignees, ` ${t("github.allAssigneesHint")}`]) : null;
+    allAssignees = repository ? el("input", { type: "checkbox", "aria-label": t("github.allAssignees"), onChange: () => { if (filters[0]) filters[0].input.disabled = allAssignees.checked; invalidate(); } }) : null;
+    allLabel = repository ? el("label", { class: "field-hint", hidden: true }, [allAssignees, ` ${t("github.allAssigneesHint")}`]) : null;
     filtersBox.replaceChildren(...filters.map((filter) => el("label", { class: "field" }, [
       el("span", { class: "field-label", text: filter.label }), filter.input
     ])), ...(allLabel ? [allLabel] : []));
@@ -122,11 +127,11 @@ export async function renderImports(region, projects, current, navigate) {
     invalidate();
   }
   function categories() {
-    if (provider.value !== "github") return;
-    const selected = providers.find((item) => item.id === "github");
+    if (!repositoryProvider()) { category.replaceChildren(el("option", { value: "", text: t("github.selectCategory") })); return; }
+    const selected = providers.find((item) => item.id === provider.value);
     category.replaceChildren(el("option", { value: "", text: t("github.selectCategory") }), ...(selected?.sources || [])
-      .filter((item) => item.id.startsWith(`${source.value}|`))
-      .map((item) => el("option", { value: item.id.split("|")[1], text: t(`github.${item.id.split("|")[1]}`) })));
+      .filter((item) => sourceRepository(item.id) === source.value)
+      .map((item) => el("option", { value: sourceCategory(item.id), text: t(`${provider.value}.${sourceCategory(item.id)}`) })));
     categoryChanged();
   }
   function categoryChanged() {
@@ -161,7 +166,7 @@ export async function renderImports(region, projects, current, navigate) {
       project_id: project.value,
       provider: provider.value,
       source: selectedSource(),
-      filters: provider.value === "github"
+      filters: repositoryProvider()
         ? (allAssignees?.checked && category.value === "issues" ? { user: "" } : filters[0]?.input.value ? { user: filters[0].input.value } : {})
         : Object.fromEntries(filters.map((filter) => [filter.id, filter.input.value]))
     };

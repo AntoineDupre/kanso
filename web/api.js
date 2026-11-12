@@ -139,6 +139,8 @@ export const api = {
 
   githubRepositories: (id) => request(`/api/projects/${enc(id)}/github-repositories`),
   saveGithubRepositories: (id, repositories) => request(`/api/projects/${enc(id)}/github-repositories`, { method: "PUT", body: repositories }),
+  gitlabRepositories: (id) => request(`/api/projects/${enc(id)}/gitlab-repositories`),
+  saveGitlabRepositories: (id, repositories) => request(`/api/projects/${enc(id)}/gitlab-repositories`, { method: "PUT", body: repositories }),
 
   board: (projectReference) =>
     request(`/api/board${query({ project: projectReference || undefined })}`),

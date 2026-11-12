@@ -73,9 +73,10 @@ impl AppState {
             auth: Arc::new(auth),
             login_limiter: Arc::new(crate::auth::LoginLimiter::default()),
             events: Arc::new(EventBus::new(heartbeat)),
-            imports: Arc::new(crate::importer::Registry::new(vec![Arc::new(
-                crate::importer::github::GitHub,
-            )])),
+            imports: Arc::new(crate::importer::Registry::new(vec![
+                Arc::new(crate::importer::github::GitHub),
+                Arc::new(crate::importer::gitlab::GitLab),
+            ])),
             github_auth: Arc::new(crate::github_auth::Manager::default()),
             openchamber: Arc::new(Mutex::new(None)),
             openchamber_settings_lock: Arc::new(tokio::sync::Mutex::new(())),

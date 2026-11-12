@@ -1583,11 +1583,11 @@ body.resizing-panel * {
   gap: 12px;
 }
 
-.github-repositories:not(:empty) {
+.github-repositories:not(:empty), .gitlab-repositories:not(:empty) {
   margin-top: 16px;
 }
 
-.settings-row:has(.github-repositories:not(:empty)) {
+.settings-row:has(.github-repositories:not(:empty)), .settings-row:has(.gitlab-repositories:not(:empty)) {
   align-items: flex-start;
 }
 
@@ -1604,7 +1604,7 @@ body.resizing-panel * {
   min-width: 0;
 }
 
-.github-repositories > button {
+.github-repositories > button, .gitlab-repositories > button {
   margin: 8px 8px 0 0;
 }
 

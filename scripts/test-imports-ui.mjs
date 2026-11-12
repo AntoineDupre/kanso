@@ -3,17 +3,15 @@
 // Build first; install Playwright in test tooling or set PLAYWRIGHT_MODULE.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir } from "node:fs/promises";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
-import { homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const root = fileURLToPath(new URL("..", import.meta.url));
-const cache = join(homedir(), ".cache/tmp/opencode");
-await mkdir(cache, { recursive: true });
-const temp = await mkdtemp(join(cache, "kanso-imports-browser-"));
+const temp = await mkdtemp(join(tmpdir(), "kanso-imports-browser-"));
 const socket = createServer();
 await new Promise((resolve) => socket.listen(0, "127.0.0.1", resolve));
 const port = socket.address().port;
@@ -103,6 +101,7 @@ try {
   await page.getByRole("button", { name: "Imports", exact: true }).click();
   await page.getByLabel("Provider", { exact: true }).waitFor();
   assert.equal(await page.getByLabel("Provider", { exact: true }).locator('option[value="github"]').count(), 1);
+  assert.equal(await page.getByLabel("Provider", { exact: true }).locator('option[value="gitlab"]').count(), 1);
   assert.equal(await page.getByRole("button", { name: "Import selected", exact: true }).count(), 0);
 
   const candidate = {
@@ -210,9 +209,123 @@ try {
   assert.equal(await sourceLink.getAttribute("href"), candidate.source_url);
   assert.equal(await sourceLink.getAttribute("rel"), "noopener noreferrer");
   assert.equal(await page.locator("#panel-root script").count(), 0);
+
+  // Real configuration endpoints: GitLab links coexist with the GitHub link.
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(`${base}/settings/projects`);
+  const gitlabToggle = page.getByRole("button", { name: "GitLab repositories", exact: true });
+  await gitlabToggle.click();
+  const gitlabPanel = page.locator(".gitlab-repositories");
+  await gitlabPanel.getByRole("button", { name: "Add repository", exact: true }).click();
+  await gitlabPanel.getByLabel("GitLab project path", { exact: true }).fill("group/nested/project");
+  await gitlabPanel.getByRole("button", { name: "Add repository", exact: true }).click();
+  await gitlabPanel.getByLabel("GitLab instance", { exact: true }).nth(1).fill("https://gitlab.example:8443");
+  await gitlabPanel.getByLabel("GitLab project path", { exact: true }).nth(1).fill("other/subgroup/project");
+  await gitlabPanel.getByRole("checkbox", { name: "Merge requests to review", exact: true }).nth(1).uncheck();
+  let releaseGitlabSave;
+  const blockedGitlabSave = new Promise((resolve) => { releaseGitlabSave = resolve; });
+  const gitlabPattern = "**/api/projects/*/gitlab-repositories";
+  await page.route(gitlabPattern, async (route) => { await blockedGitlabSave; await route.continue(); });
+  const gitlabSaving = page.waitForRequest((request) => request.url().endsWith("/gitlab-repositories") && request.method() === "PUT");
+  await gitlabPanel.getByRole("button", { name: "Save repositories", exact: true }).click();
+  await gitlabSaving;
+  assert.equal(await gitlabToggle.isDisabled(), true);
+  releaseGitlabSave();
+  await page.getByText("GitLab repositories saved", { exact: true }).waitFor();
+  await page.unroute(gitlabPattern);
+  const gitlabConfiguration = async () => {
+    const response = await page.request.get(`${base}/api/projects/${project.id}/gitlab-repositories`);
+    assert.equal(response.status(), 200);
+    return response.json();
+  };
+  let gitlabRepositories = await gitlabConfiguration();
+  assert.equal(gitlabRepositories.length, 2);
+  assert.ok(gitlabRepositories.some((repo) => repo.instance === "https://gitlab.example:8443" && !repo.review));
+  const githubStillConfigured = await page.request.get(`${base}/api/projects/${project.id}/github-repositories`);
+  assert.equal((await githubStillConfigured.json())[0].repository, "fixture/repository");
+  await page.setViewportSize({ width: 360, height: 780 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  if (screenshots) await page.screenshot({ path: join(resolve(screenshots), "gitlab-settings-mobile.png"), fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 900 });
+  // Edit one path and remove the other, then persist a second time.
+  await gitlabPanel.getByLabel("GitLab project path", { exact: true }).nth(0).fill("group/nested/renamed");
+  await gitlabPanel.getByRole("button", { name: "Remove", exact: true }).nth(1).click();
+  await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith("/gitlab-repositories") && response.request().method() === "PUT"),
+    gitlabPanel.getByRole("button", { name: "Save repositories", exact: true }).click()
+  ]);
+  gitlabRepositories = await gitlabConfiguration();
+  assert.equal(gitlabRepositories.length, 1);
+  assert.equal(gitlabRepositories[0].repository, "group/nested/renamed");
+
+  // Intercept only remote preview/confirmation data. No cloud credential is used.
+  await page.unroute("**/api/imports/providers**");
+  await page.unroute("**/api/imports/preview");
+  await page.unroute("**/api/imports/confirm");
+  const glSource = "https://gitlab.com|group/nested/renamed";
+  await page.route("**/api/imports/providers**", (route) => route.fulfill({ json: [
+    { id: "github", name: "GitHub", sources: [{ id: "fixture/repository|issues", name: "GitHub fixture" }], filters: [{ id: "user", label: "GitHub username" }] },
+    { id: "gitlab", name: "GitLab", sources: ["issues", "review", "follow"].map((category) => ({ id: `${glSource}|${category}`, name: `GitLab ${category}` })), filters: [{ id: "user", label: "GitLab username" }] }
+  ] }));
+  let expectedCategory = "issues";
+  let expectedFilters = {};
+  await page.route("**/api/imports/preview", async (route) => {
+    assert.deepEqual(route.request().postDataJSON(), { project_id: project.id, provider: "gitlab", source: `${glSource}|${expectedCategory}`, filters: expectedFilters });
+    await route.fulfill({ json: { preview_id: "gitlab-snapshot", candidates: [{ index: 0, valid: true, existing: null, candidate: { ...candidate, kind: "Merge request to review", source_url: "https://gitlab.com/group/nested/renamed/-/merge_requests/7" } }] } });
+  });
+  await page.route("**/api/imports/confirm", async (route) => {
+    assert.deepEqual(route.request().postDataJSON(), { preview_id: "gitlab-snapshot", project_id: project.id, provider: "gitlab", source: `${glSource}|${expectedCategory}`, selected: [0] });
+    await route.fulfill({ json: [{ index: 0, status: "skipped", reference: "UIT-1", message: null }] });
+  });
+  await page.goto(`${base}/imports`);
+  await page.getByLabel("Destination project", { exact: true }).selectOption(project.id);
+  await page.getByLabel("Provider", { exact: true }).selectOption("gitlab");
+  await page.getByLabel("Source", { exact: true }).selectOption(glSource);
+  const glCategory = page.getByLabel("GitLab category", { exact: true });
+  await glCategory.selectOption("issues");
+  const glPreview = page.getByRole("button", { name: "Preview", exact: true });
+  const glConfirm = page.getByRole("button", { name: "Import selected", exact: true });
+  await glPreview.click();
+  await choice.waitFor();
+  assert.equal(await choice.isChecked(), false);
+  assert.equal(await glConfirm.isDisabled(), true);
+  await page.getByLabel("All assignees", { exact: true }).check();
+  assert.equal(await glConfirm.count(), 0);
+  assert.equal(await page.getByLabel("GitLab username", { exact: true }).isDisabled(), true);
+  expectedFilters = { user: "" };
+  await glPreview.click();
+  await choice.waitFor();
+  await glCategory.selectOption("review");
+  assert.equal(await glConfirm.count(), 0);
+  assert.equal(await page.getByLabel("All assignees", { exact: true }).isVisible(), false);
+  assert.equal(await page.getByLabel("GitLab username", { exact: true }).isEnabled(), true);
+  expectedCategory = "review";
+  expectedFilters = { user: "alice" };
+  await page.getByLabel("GitLab username", { exact: true }).fill("alice");
+  await glPreview.click();
+  await choice.check();
+  await glConfirm.click();
+  await page.getByRole("status").getByText("skipped", { exact: false }).waitFor();
+  if (screenshots) await page.screenshot({ path: join(resolve(screenshots), "gitlab-imports-desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 360, height: 780 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  if (screenshots) await page.screenshot({ path: join(resolve(screenshots), "gitlab-imports-mobile.png"), fullPage: true });
+  await glCategory.selectOption("follow");
+  expectedCategory = "follow";
+  expectedFilters = {};
+  await page.getByLabel("GitLab username", { exact: true }).fill("");
+  await glPreview.click();
+  await choice.waitFor();
+  await page.getByLabel("Provider", { exact: true }).selectOption("github");
+  assert.equal(await glConfirm.count(), 0);
+  assert.equal(await page.getByLabel("GitHub category", { exact: true }).isVisible(), true);
+  assert.equal(await glPreview.isDisabled(), true);
   assert.deepEqual(errors, []);
-  console.log("Imports real-browser verification passed (production registration, selection, safe rendering, retry, invalidation, errors, desktop/mobile).");
+  console.log("Imports real-browser verification passed (GitHub and GitLab configuration, nested paths, categories, explicit selection, safe rendering, retry, invalidation, errors, desktop/mobile).");
 } finally {
   if (browser) await browser.close();
+  const stopped = server.pid && server.exitCode === null ? new Promise((resolve) => server.once("exit", resolve)) : Promise.resolve();
   server.kill("SIGTERM");
+  await stopped;
+  await rm(temp, { recursive: true, force: true });
 }

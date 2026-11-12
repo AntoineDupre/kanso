@@ -6,6 +6,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 pub mod github;
+pub mod gitlab;
 
 /// All metadata is public and must never contain credentials.
 #[derive(Clone, Debug, Serialize)]

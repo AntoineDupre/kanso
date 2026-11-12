@@ -32,6 +32,7 @@ mod events;
 mod export;
 mod github_auth;
 mod github_repositories;
+mod gitlab_repositories;
 mod imports;
 mod inbox;
 pub(crate) mod integration;
@@ -415,6 +416,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/projects/{id}/github-repositories",
             get(github_repositories::list).put(github_repositories::replace),
+        )
+        .route(
+            "/api/projects/{id}/gitlab-repositories",
+            get(gitlab_repositories::list).put(gitlab_repositories::replace),
         )
         .route("/api/tasks", get(tasks::list).post(tasks::create))
         .route(

@@ -1154,7 +1154,9 @@ async function renderSettingsProjects(token) {
 function renderProjectRow(project, archived, human, refresh) {
   const actions = [];
   const githubPanel = el("div", { class: "github-repositories" });
+  const gitlabPanel = el("div", { class: "gitlab-repositories" });
   let githubGeneration = 0;
+  let gitlabGeneration = 0;
   if (human) {
     actions.push(
       el(
@@ -1182,10 +1184,20 @@ function renderProjectRow(project, archived, human, refresh) {
         githubPanel.replaceChildren(el("p", { text: t("common.loading") }));
         try {
           const repositories = await api.githubRepositories(project.id);
-          if (generation === githubGeneration) renderGithubRepositories(githubPanel, project, repositories, () => generation === githubGeneration, (saving) => { githubToggle.disabled = saving; });
+          if (generation === githubGeneration) renderRepositorySettings(githubPanel, project, repositories, () => generation === githubGeneration, (saving) => { githubToggle.disabled = saving; });
         } catch (error) { if (generation === githubGeneration) githubPanel.replaceChildren(el("p", { class: "form-error", role: "alert", text: error.message })); }
       } });
       actions.push(githubToggle);
+      const gitlabToggle = el("button", { type: "button", class: "button button-ghost button-small", text: t("gitlab.repositories"), onClick: async () => {
+        const generation = ++gitlabGeneration;
+        if (gitlabPanel.childNodes.length) { gitlabPanel.replaceChildren(); return; }
+        gitlabPanel.replaceChildren(el("p", { text: t("common.loading") }));
+        try {
+          const repositories = await api.gitlabRepositories(project.id);
+          if (generation === gitlabGeneration) renderRepositorySettings(gitlabPanel, project, repositories, () => generation === gitlabGeneration, (saving) => { gitlabToggle.disabled = saving; }, "gitlab");
+        } catch (error) { if (generation === gitlabGeneration) gitlabPanel.replaceChildren(el("p", { class: "form-error", role: "alert", text: error.message })); }
+      } });
+      actions.push(gitlabToggle);
       actions.push(
         el(
           "button",
@@ -1230,31 +1242,33 @@ function renderProjectRow(project, archived, human, refresh) {
         ? el("p", { class: "muted settings-row-description", text: project.description })
         : null,
       project.repo_path ? el("code", { class: "settings-row-repo", text: project.repo_path }) : null,
-      githubPanel
+      githubPanel,
+      gitlabPanel
     ]),
     actions.length ? el("div", { class: "settings-row-actions" }, actions) : null
   ]);
 }
 
-function renderGithubRepositories(panel, project, initial, current, setSaving) {
+function renderRepositorySettings(panel, project, initial, current, setSaving, provider = "github") {
   const list = el("div");
   const error = el("p", { class: "form-error", role: "alert" });
   const rows = [];
-  function add(item = { repository: "", issues: true, review: true, follow: true }) {
-    const repository = el("input", { class: "input", value: item.repository, placeholder: t("github.repositoryPlaceholder"), "aria-label": t("github.repository") });
+  function add(item = { instance: "https://gitlab.com", repository: "", issues: true, review: true, follow: true }) {
+    const instance = provider === "gitlab" ? el("input", { class: "input", value: item.instance, placeholder: t("gitlab.instancePlaceholder"), "aria-label": t("gitlab.instance"), type: "url" }) : null;
+    const repository = el("input", { class: "input", value: item.repository, placeholder: t(`${provider}.repositoryPlaceholder`), "aria-label": t(`${provider}.repository`) });
     const flags = Object.fromEntries(["issues", "review", "follow"].map((key) => {
-      const label = t(`github.${key}`);
+      const label = t(`${provider}.${key}`);
       const input = el("input", { type: "checkbox", checked: item[key], "aria-label": label });
       return [key, { input, label }];
     }));
-    const row = el("div", { class: "github-repository" }, [repository,
+    const row = el("div", { class: "github-repository" }, [instance, repository,
       ...Object.values(flags).map(({ input, label }) => el("label", { class: "field-hint" }, [input, ` ${label} `])),
       el("button", { type: "button", class: "button button-ghost button-small", text: t("github.removeRepository"), onClick: () => { row.remove(); rows.splice(rows.indexOf(record), 1); } })]);
-    const record = { repository, flags }; rows.push(record); list.append(row);
+    const record = { instance, repository, flags }; rows.push(record); list.append(row);
   }
   initial.forEach(add);
-  panel.replaceChildren(el("h3", { text: t("github.repositories") }),
-    el("p", { class: "field-hint", text: t("github.settingsHint") }), list,
+  panel.replaceChildren(el("h3", { text: t(`${provider}.repositories`) }),
+    el("p", { class: "field-hint", text: t(`${provider}.settingsHint`) }), list,
     el("button", { type: "button", class: "button button-ghost button-small", text: t("github.addRepository"), onClick: () => add() }),
     el("button", { type: "button", class: "button button-primary button-small", text: t("github.saveRepositories"), onClick: async (event) => {
       error.textContent = "";
@@ -1262,12 +1276,13 @@ function renderGithubRepositories(panel, project, initial, current, setSaving) {
       saveButton.disabled = true;
       setSaving(true);
       try {
-        const saved = await api.saveGithubRepositories(project.id, rows.map(({ repository, flags }) => ({
-          repository: repository.value.trim(), issues: flags.issues.input.checked, review: flags.review.input.checked, follow: flags.follow.input.checked
+        const save = provider === "gitlab" ? api.saveGitlabRepositories : api.saveGithubRepositories;
+        const saved = await save(project.id, rows.map(({ instance, repository, flags }) => ({
+          ...(instance ? { instance: instance.value.trim() } : {}), repository: repository.value.trim(), issues: flags.issues.input.checked, review: flags.review.input.checked, follow: flags.follow.input.checked
         })));
         if (!current()) return;
-        renderGithubRepositories(panel, project, saved, current, setSaving);
-        toast(t("github.saved"), "success");
+        renderRepositorySettings(panel, project, saved, current, setSaving, provider);
+        toast(t(`${provider}.saved`), "success");
       } catch (failure) { if (current()) error.textContent = failure.message; }
       finally { saveButton.disabled = false; setSaving(false); }
     } }), error);

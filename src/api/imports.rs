@@ -91,7 +91,7 @@ fn usable_info(info: &ProviderInfo) -> bool {
         && info
             .sources
             .iter()
-            .all(|s| valid_metadata(&s.id, 256) && valid_metadata(&s.name, 200))
+            .all(|s| valid_metadata(&s.id, 2048) && valid_metadata(&s.name, 2300))
         && info
             .filters
             .iter()
