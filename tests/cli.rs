@@ -1172,6 +1172,127 @@ fn blocker_reason_round_trips_and_rejects_a_reason_elsewhere() {
 }
 
 #[test]
+fn manual_codex_workflow_uses_agent_config_without_an_integration() {
+    let server = TestServer::start();
+    let human = server.create_token("manual-human", "human");
+    let agent = server.create_token("manual-codex", "agent");
+    create_project_and_card(&server, &human);
+
+    let integration: Value =
+        serde_json::from_str(&api_get(&server, "/api/integration", &agent)).expect("integration");
+    assert_eq!(integration["openchamber"]["enabled"], false);
+
+    let installed = command(&server, None, &["skill", "--install", "--target", "codex"]);
+    assert_exit(&installed, 0);
+    assert_eq!(
+        std::fs::read_to_string(server.data_dir().join(".agents/skills/kanso/SKILL.md"))
+            .expect("installed Codex skill"),
+        kanso::skill::SKILL
+    );
+
+    // The operator provisions the config once. All subsequent agent commands
+    // use it, with neither KANSO_URL nor KANSO_TOKEN injected by the helper.
+    assert_exit(&config_init(&server, &agent, false), 0);
+    let next = command(&server, None, &["next", "--project", "ALP", "--json"]);
+    assert_exit(&next, 0);
+    assert_eq!(json_stdout(&next)["reference"], "ALP-1");
+    assert_exit(
+        &command(
+            &server,
+            None,
+            &["claim", "ALP-1", "--agent", "codex-worker"],
+        ),
+        0,
+    );
+    assert_exit(
+        &command(
+            &server,
+            None,
+            &["check", "ALP-1", "--add", "Verify the expected output"],
+        ),
+        0,
+    );
+    assert_exit(
+        &command(
+            &server,
+            None,
+            &["comment", "ALP-1", "Implementation ready for verification"],
+        ),
+        0,
+    );
+
+    let reason = "Expected output is missing from the specification";
+    assert_exit(
+        &command(
+            &server,
+            None,
+            &["move", "ALP-1", "blocker", "--reason", reason],
+        ),
+        0,
+    );
+    // In manual mode the human leaves a normal comment and explicitly resumes
+    // Codex. There is no session.send, automatic wake-up or polling involved.
+    let answer = "The expected output is normalized lowercase text";
+    assert_exit(
+        &command(&server, Some(&human), &["comment", "ALP-1", answer]),
+        0,
+    );
+    let resumed = command(&server, None, &["task", "show", "ALP-1", "--json"]);
+    assert_exit(&resumed, 0);
+    let resumed = json_stdout(&resumed);
+    assert_eq!(resumed["status"], "blocker");
+    assert_eq!(resumed["blocked_reason"], reason);
+    assert!(resumed["comments"]
+        .as_array()
+        .expect("comments")
+        .iter()
+        .any(|comment| comment["body"] == answer && comment["author"] == "manual-human"));
+    assert_exit(&command(&server, None, &["move", "ALP-1", "restore"]), 0);
+    assert_exit(
+        &command(&server, None, &["check", "ALP-1", "--done", "1"]),
+        0,
+    );
+    assert_exit(
+        &command(
+            &server,
+            None,
+            &[
+                "comment",
+                "ALP-1",
+                "Verification complete; ready for human review",
+            ],
+        ),
+        0,
+    );
+    assert_exit(&command(&server, None, &["move", "ALP-1", "in_review"]), 0);
+
+    let denied = command(&server, None, &["move", "ALP-1", "done"]);
+    assert_exit(&denied, 2);
+    assert!(stderr(&denied).contains("forbidden"));
+    let reviewed = command(&server, None, &["task", "show", "ALP-1", "--json"]);
+    assert_exit(&reviewed, 0);
+    let reviewed = json_stdout(&reviewed);
+    assert_eq!(reviewed["status"], "in_review");
+    assert_eq!(reviewed["claimed_by"], "manual-codex");
+    assert_eq!(reviewed["checklist"][0]["done"], true);
+    assert!(reviewed["blocked_reason"].is_null());
+    for field in ["session_id", "session_directory", "session_status"] {
+        assert!(reviewed[field].is_null(), "{field}: {}", reviewed[field]);
+    }
+    assert!(reviewed["activity"]
+        .as_array()
+        .expect("activity")
+        .iter()
+        .any(|entry| entry["kind"] == "claimed" && entry["actor"] == "codex-worker"));
+
+    // Completion is still available to the human after review.
+    assert_exit(
+        &command(&server, Some(&human), &["move", "ALP-1", "done"]),
+        0,
+    );
+}
+
+#[test]
 fn backup_skill_and_tokens_work_from_the_cli() {
     let server = TestServer::start();
     let human = server.create_token("human-cli", "human");

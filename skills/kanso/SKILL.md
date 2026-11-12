@@ -9,12 +9,34 @@ You are an agent working a card from a Kanso board. Kanso tracks the work; the
 human owns priorities, review and completion. Work only in the worktree you were
 given: never create another worktree, change directory, or touch another card.
 
+## Session mode
+
+- **Manual session**, including manually started Codex: use the CLI to track
+  work. Kanso does not start, observe or resume this session. On a blocker,
+  report the missing information and stop with a handoff; the human must
+  explicitly resume the agent with an answer. A board comment alone does not
+  wake the agent. After the human resumes you, read the card and its comments
+  once if needed, then continue and restore the card when unblocked. Do not
+  poll for an answer or use `kanso secret request` in this mode.
+- **OpenChamber session**: use the linked-session reply and secret flows below
+  only when this is the OpenChamber session dispatched or linked to the card.
+  A `session_id` on a card does not prove that the current agent owns that
+  session. Do not link a Codex thread with `kanso session link`; that endpoint
+  is for OpenChamber sessions.
+
+Use manual mode unless the launch context establishes the OpenChamber link.
+
 ## The loop
 
-1. **Pick a card.** Run `kanso next --project ALP` (omit `--project` for any
-   project). Read the card with `kanso task show ALP-42`.
-2. **Claim it.** Run `kanso claim ALP-42`. If it exits with code `3`, the card is
-   already claimed or blocked; pick the next one instead of retrying.
+1. **Read the assigned card** with `kanso task show ALP-42`. If no card was
+   assigned, run `kanso next --project ALP` (omit `--project` for any project)
+   and read the selected card.
+2. **Claim an unclaimed backlog/todo card** with `kanso claim ALP-42`. If it
+   exits with code `3`, do not retry blindly or switch away from an explicitly
+   assigned card. If a choice was allowed, pick another card. A dispatched
+   session already has a reserved card; do not claim it again. On explicit
+   resumption, continue your existing claim rather than claiming again. If
+   another worker owns the card, stop and report the conflict.
 3. **Do the work** in the current worktree only.
 4. **Report milestones**, not a transcript. A short `kanso comment ALP-42 "…"`
    when a meaningful piece lands, when you hit a decision, and when you stop.
@@ -26,10 +48,11 @@ given: never create another worktree, change directory, or touch another card.
    in progress until it is ready for human review.
 6. **If blocked**, run
    `kanso move ALP-42 blocker --reason "what you need"`. The reason is shown on
-   the board; keep it concrete and short (500 characters at most). The human's
-   answer arrives as a new message in the same session; continue the work and
-   move the card out of blocker when you are unblocked. Do not poll for the
-   answer.
+   the board; keep it concrete and short (500 characters at most). In manual
+   mode, stop and hand off for explicit human resumption. In a linked
+   OpenChamber session, the human's answer arrives as a new message in the
+   same session; continue the work and move the card out of blocker when you
+   are unblocked. Do not poll for the answer.
 
 ## Rules
 
@@ -52,8 +75,12 @@ given: never create another worktree, change directory, or touch another card.
 
 For a credential, do not ask the human to put it in a reply, comment, prompt,
 or file, and do not manually read, print, or store the value or retrieval
-capability; the CLI handles its private capability file. On an
-in-progress card with a linked session, use `kanso secret request ALP-42 --label
+capability. In manual mode, report the required access through the blocker
+flow and stop; the operator must provision it outside the conversation before
+resuming you. Manual Codex has no Kanso secret notification channel.
+
+In the card's linked OpenChamber session, the CLI handles its private capability
+file. On an in-progress card, use `kanso secret request ALP-42 --label
 "API token" --purpose "Connect to the service"`. Label and purpose are public:
 never put credentials in them. The request moves the card to blocker. Wait for
 the session notification; do not poll. After submission, use `kanso secret exec
@@ -79,7 +106,7 @@ kanso move ALP-42 blocker --reason "…" [--agent NAME]
 kanso move ALP-42 restore
 kanso propose "Idea" --project ALP [--description "…"] [--label NAME|ID]… [--agent NAME]
 kanso inbox
-# human only, not part of the agent loop:
+# human only, for an OpenChamber session, not a Codex thread:
 kanso session link ALP-42 ses_… --directory /path/to/worktree
 ```
 

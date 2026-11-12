@@ -2,8 +2,8 @@
 
 External task imports: see [Imports](docs/IMPORTS.md). Provider support is not yet enabled.
 
-A single-user kanban board for your projects, with **optional** OpenCode /
-OpenChamber agent sessions.
+A single-user kanban board for your projects, with a CLI and skill for manual
+Codex / OpenCode work and **optional** OpenChamber agent sessions.
 
 The design, scope and milestone plan live in [PLAN.md](PLAN.md). It is the
 reference for the architecture, data model, HTTP API, CLI and roadmap; the code
@@ -146,7 +146,7 @@ kanso inbox
 kanso session link ALP-42 ses_… --directory /path/to/worktree
 kanso token create --name build --scope agent   # prints the token once
 kanso token list | revoke build
-kanso skill [--print] [--install [--dir ~/.config/opencode/skills]]
+kanso skill [--print] [--install [--target opencode|codex] [--dir DIR]]
 kanso backup [--out DIR]
 ```
 
@@ -163,16 +163,84 @@ comments, activity and `created_by` (not `claimed_by` or claim ownership). The h
 agent-scope tokens; a human token ignores it, and an empty, over-long, reserved
 (`ui`) or control-character name is a validation error.
 
-`kanso skill --print` writes the embedded `skills/kanso/SKILL.md`; `kanso skill
---install` writes `<dir>/kanso/SKILL.md` (default
-`~/.config/opencode/skills`), creating parents and reporting whether it
-installed, updated or found the file already up to date.
+`kanso skill` and `kanso skill --print` print the embedded
+`skills/kanso/SKILL.md`. `kanso skill --install` installs it for OpenCode under
+`~/.config/opencode/skills/kanso/SKILL.md`; `--target opencode` makes that
+default explicit. `kanso skill --install --target codex` installs the same
+skill under `~/.agents/skills/kanso/SKILL.md`. Codex discovers user skills in
+`~/.agents/skills` and repository skills in `.agents/skills`, as described in
+the [official skill documentation](https://learn.chatgpt.com/docs/build-skills).
+`--dir DIR` overrides the selected target's base directory, creating
+`DIR/kanso/SKILL.md`; it also works without `HOME`. Both `--target` and `--dir`
+require `--install`. Installation creates parents and reports installed,
+updated or up to date; identical content is not rewritten. Printing and
+installation do not need a running server, authentication or a Codex binary.
 
 `kanso backup` asks the server to run `VACUUM INTO` under
 `<data_dir>/backups/` and prints the server-side path. `--out DIR` is resolved
 by the server under the data directory; paths that escape it are rejected. There
 is no download endpoint in this milestone, so a host directory cannot be
 targeted directly.
+
+### Manual Codex workflow
+
+This mode uses the existing Kanso API through the CLI and works with
+OpenChamber disabled. Kanso does not launch Codex, follow its session status,
+deliver replies into its conversation or send it secret notifications.
+
+1. As the human operator, install the `kanso` binary in the environment where
+   Codex executes commands. Create a dedicated token with scope `agent` under
+   **Settings → Tokens**, then provision the client configuration described
+   above outside the agent conversation. Use a private configuration file or
+   inject `KANSO_URL` and `KANSO_TOKEN` into the launch environment; do not put
+   credentials in a prompt or card comment. Codex needs its own authentication
+   as usual; the Kanso token only authorizes the board API.
+2. Prepare the repository and worktree as the operator, and start Codex there.
+   The skill keeps the agent in that working directory. Ensure the CLI can
+   reach the Kanso URL from the agent's execution environment, including any
+   sandbox or remote host. If using a custom client configuration, set
+   `KANSO_CONFIG` in that environment.
+3. Install the skill for the same OS user that runs Codex:
+
+   ```sh
+   kanso skill --install --target codex
+   # Alternatively, install only for this repository:
+   kanso skill --install --target codex --dir .agents/skills
+   ```
+
+4. In Codex, invoke the skill with an assigned card, for example:
+
+   ```text
+   $kanso Work on ALP-42 in this prepared worktree. Report progress in Kanso
+   and hand the result over for human review when ready.
+   ```
+
+   Codex can also select an available card with `kanso next --project ALP`.
+   Reading, claiming, commenting and checklist updates use the existing CLI:
+
+   ```sh
+   kanso task show ALP-42
+   kanso claim ALP-42 --agent codex-worker
+   kanso comment ALP-42 "Implementation started" --agent codex-worker
+   kanso check ALP-42 --add "Verify the acceptance criteria" --agent codex-worker
+   kanso check ALP-42 --list
+   # After verification, replace 1 with the item's number from --list:
+   kanso check ALP-42 --done 1 --agent codex-worker
+   ```
+
+If blocked, the agent runs `kanso move ALP-42 blocker --reason "Missing
+acceptance criterion"`, reports the handoff and stops. The human explicitly
+resumes the Codex conversation with the answer, optionally referencing a new
+board comment. The agent can then read the card/comments and run `kanso move
+ALP-42 restore` before continuing. A comment on the board does not resume
+Codex automatically; the agent must not poll. Credential blockers require the
+operator to provision access outside the conversation before resuming it.
+
+When work and checks are ready for human review, the agent comments the
+changes, test results, commit references and limitations, then runs `kanso move
+ALP-42 in_review`. AI-to-AI review stays in `in_progress`; only the human marks
+the card `done`. Do not link a Codex thread using `kanso session link`: linked
+session replies and Kanso secret handoffs currently belong to OpenChamber.
 
 ## Checks
 
